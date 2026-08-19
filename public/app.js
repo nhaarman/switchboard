@@ -115,8 +115,14 @@ const sessionBusyState = new Map(); // sessionId → boolean (currently active)
 
 // Central activity dispatcher
 function setActivity(sessionId, active) {
+  // A turn starting again supersedes an unread answer: the row goes back to
+  // working. Only an idle signal is ignored while unread — otherwise a late
+  // idle repaint would clear a mark the user hasn't seen yet.
   if (responseReadySessions.has(sessionId)) {
-    return;
+    if (!active) return;
+    responseReadySessions.delete(sessionId);
+    const readyItem = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+    if (readyItem) readyItem.classList.remove('response-ready');
   }
 
   const wasActive = sessionBusyState.get(sessionId) || false;

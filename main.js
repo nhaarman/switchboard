@@ -1018,6 +1018,23 @@ ipcMain.handle('archive-session', (_event, sessionId, archived) => {
   return { archived: val };
 });
 
+// One place to push busy state at the renderer, so every signal that flips
+// _cliBusy reports through the same deduplicated path.
+//
+// Note this tracks the CLI's own turn only. A session whose agents were sent to
+// the background while the main loop sits at the prompt reports idle: the
+// footer's "N agents" count stays up after they finish, so it can't tell live
+// agents from finished ones.
+function emitBusyState(session, sessionId) {
+  const busy = !!session._cliBusy;
+  if (busy === session._emittedBusy) return;
+  session._emittedBusy = busy;
+  log.debug(`[busy] session=${sessionId} → ${busy ? 'BUSY' : 'IDLE'}`);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('cli-busy-state', sessionId, busy);
+  }
+}
+
 // Everything the app derives from a session's output: busy state, iTerm2
 // notifications, alternate-screen tracking. The bytes now arrive over the daemon
 // socket instead of straight off a local pty, but the parsing is unchanged.
@@ -1041,26 +1058,24 @@ function handleSessionData(session, sessionId, data, meta = {}) {
     for (const m of oscMatches) {
       const code = m[1];
       const payload = m[2].slice(0, 120);
-      // Detect Claude CLI busy state from OSC 0 title (spinner chars = busy, ✳ = idle)
+      // Detect Claude CLI busy state from OSC 0 title. The spinner glyph leads the
+      // title while a turn runs; anything else (✳, a bare project name) means idle.
+      // Two spinner sets are in the wild: braille (U+2800-U+28FF, older CLIs) and the
+      // half-circle ◐◑◒◓ (U+25D0-U+25D3) the current one uses.
       if (code === '0') {
         const firstChar = payload.charAt(0);
-        const isBusy = firstChar.charCodeAt(0) >= 0x2800 && firstChar.charCodeAt(0) <= 0x28FF;
-        const isIdle = firstChar === '\u2733'; // ✳
-        log.debug(`[OSC 0] session=${currentId} char=U+${firstChar.charCodeAt(0).toString(16).toUpperCase()} busy=${isBusy} idle=${isIdle} wasBusy=${!!session._cliBusy}`);
+        const cp = firstChar ? firstChar.charCodeAt(0) : 0;
+        const isBusy = (cp >= 0x2800 && cp <= 0x28FF) || (cp >= 0x25D0 && cp <= 0x25D3);
+        const isIdle = !isBusy && payload.length > 0;
+        log.debug(`[OSC 0] session=${currentId} char=U+${cp.toString(16).toUpperCase()} busy=${isBusy} idle=${isIdle} wasBusy=${!!session._cliBusy}`);
         if (isBusy && !session._cliBusy) {
           session._cliBusy = true;
           session._oscIdle = false;
-          log.debug(`[OSC 0] session=${currentId} → BUSY`);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('cli-busy-state', currentId, true);
-          }
+          emitBusyState(session, currentId);
         } else if (isIdle && session._cliBusy) {
           session._cliBusy = false;
           session._oscIdle = true;
-          log.debug(`[OSC 0] session=${currentId} → IDLE`);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('cli-busy-state', currentId, false);
-          }
+          emitBusyState(session, currentId);
         }
       }
     }
@@ -1076,10 +1091,7 @@ function handleSessionData(session, sessionId, data, meta = {}) {
         if ((level === '1' || level === '2' || level === '3') && !session._cliBusy) {
           session._cliBusy = true;
           session._oscIdle = false;
-          log.debug(`[OSC 9;4] session=${currentId} → BUSY`);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('cli-busy-state', currentId, true);
-          }
+          emitBusyState(session, currentId);
         }
       } else {
         // Regular notification (attention, permission, etc.)

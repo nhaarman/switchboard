@@ -1,7 +1,8 @@
 // --- Sidebar rendering ---
 // The session list is flat: one list of sessions across all projects, never
-// grouped by directory. Sessions that are active (running process, or flagged
-// as needing attention / unread) always sort to the top, most recent first.
+// grouped by directory. Sessions waiting on the user sort to the top, then the
+// ones that finished unread, then the ones still working — each block most
+// recent first.
 // Sessions belonging to the same slug are still folded into a slug group.
 //
 // Depends on globals: sidebarContent, openSessions, activeSessionId, activePtyIds,
@@ -124,27 +125,39 @@ function buildSlugGroup(slug, sessions, projectPath) {
   return group;
 }
 
-// Sort tiers, highest first. Active (running or waiting on the user) always
-// wins, so those rows stay at the top of the list regardless of age.
-const TIER_ACTIVE = 2;
+// Sort tiers, highest first. The active block is split by what the session
+// wants from the user: first the ones blocking on input, then the ones that
+// finished and haven't been read, then the ones still working. Those three
+// always outrank pinned and plain recent rows regardless of age.
+const TIER_ATTENTION = 4;
+const TIER_READY = 3;
+const TIER_RUNNING = 2;
 const TIER_PINNED = 1;
 const TIER_REST = 0;
 
 const TIER_LABELS = {
-  [TIER_ACTIVE]: 'Active',
+  [TIER_ATTENTION]: 'Needs input',
+  [TIER_READY]: 'Ready',
+  [TIER_RUNNING]: 'Working',
   [TIER_PINNED]: 'Pinned',
   [TIER_REST]: 'Recent',
 };
 
-function isSessionActive(sessionId) {
-  return activePtyIds.has(sessionId)
-    || pendingSessions.has(sessionId)
-    || attentionSessions.has(sessionId)
-    || responseReadySessions.has(sessionId);
+// A live session that isn't spinning has finished its turn, whether or not the
+// user has read it yet — both count as ready. Only a session the CLI reports as
+// busy (or one still starting up) is working. Busy state is only known from the
+// OSC 0 spinner, so a session idle since before this window opened reads as
+// ready, which is what it is.
+function sessionTier(sessionId) {
+  if (attentionSessions.has(sessionId)) return TIER_ATTENTION;
+  if (responseReadySessions.has(sessionId)) return TIER_READY;
+  if (sessionBusyState.get(sessionId) || pendingSessions.has(sessionId)) return TIER_RUNNING;
+  if (activePtyIds.has(sessionId)) return TIER_READY;
+  return TIER_REST;
 }
 
 function itemTier(item) {
-  if (item.active) return TIER_ACTIVE;
+  if (item.tier >= TIER_RUNNING) return item.tier;
   if (item.pinned) return TIER_PINNED;
   return TIER_REST;
 }
@@ -193,7 +206,7 @@ function renderSessionList(projects, resort) {
       allItems.push({
         sortTime: new Date(session.modified).getTime(),
         pinned: !!session.starred,
-        active: isSessionActive(session.sessionId),
+        tier: sessionTier(session.sessionId),
         element: buildSessionItem(session, projectPath),
       });
     }
@@ -205,22 +218,24 @@ function renderSessionList(projects, resort) {
       allItems.push({
         sortTime: Math.max(...sorted.map(s => new Date(s.modified).getTime())),
         pinned: sorted.some(s => s.starred),
-        active: sorted.some(s => isSessionActive(s.sessionId)),
+        tier: Math.max(...sorted.map(s => sessionTier(s.sessionId))),
         element,
       });
     }
   }
 
-  // Order: active first (always re-sorted by recency, so a session that starts
-  // running or asks a question jumps to the top), then pinned, then the rest.
-  // Below the active block the previous order is preserved unless the caller
-  // asked for a re-sort, so rows don't shuffle under the cursor.
+  // Order: sessions needing input first, then finished-but-unread, then still
+  // working, then pinned, then the rest. A session changing state moves to its
+  // new block, but inside a block nothing is re-ordered: the previous order is
+  // preserved unless the caller asked for a re-sort, so rows never shuffle
+  // under the cursor. Rows the previous render didn't have go on top of their
+  // block, most recent first.
   const prevIndex = new Map(sortedOrder.map((id, i) => [id, i]));
   allItems.sort((a, b) => {
     const aTier = itemTier(a);
     const bTier = itemTier(b);
     if (aTier !== bTier) return bTier - aTier;
-    if (aTier === TIER_ACTIVE || resort || prevIndex.size === 0) return b.sortTime - a.sortTime;
+    if (resort || prevIndex.size === 0) return b.sortTime - a.sortTime;
     const aPos = prevIndex.get(a.element.id);
     const bPos = prevIndex.get(b.element.id);
     if (aPos !== undefined && bPos !== undefined) return aPos - bPos;
@@ -239,7 +254,7 @@ function renderSessionList(projects, resort) {
     let count = 0;
     const ageCutoff = Date.now() - sessionMaxAgeDays * 86400000;
     for (const item of allItems) {
-      if (item.active || item.pinned || (count < visibleSessionCount && item.sortTime >= ageCutoff)) {
+      if (item.tier >= TIER_RUNNING || item.pinned || (count < visibleSessionCount && item.sortTime >= ageCutoff)) {
         visible.push(item);
         count++;
       } else {
