@@ -196,14 +196,19 @@ async function handleOpenDiff(entry, rpcId, args, log) {
     entry.pendingDiffs.set(diffId, { resolve, rpcId, tabName: tab_name });
   });
 
-  // Send to renderer
-  if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-    entry.mainWindow.webContents.send('mcp-open-diff', entry.sessionId, diffId, {
+  if (uiAlive(entry)) {
+    emit(entry, 'mcp-open-diff', entry.sessionId, diffId, {
       oldFilePath: old_file_path,
       oldContent,
       newContent: new_file_contents,
       tabName: tab_name,
     });
+  } else {
+    // Nobody is attached to accept or reject — answer as if the tab was closed.
+    entry.pendingDiffs.delete(diffId);
+    log.info(`[mcp] session=${entry.sessionId} openDiff with no UI attached — auto TAB_CLOSED`);
+    sendResult(entry, rpcId, { content: [{ type: 'text', text: 'TAB_CLOSED' }] });
+    return;
   }
 
   // Await user action
@@ -241,8 +246,8 @@ async function handleOpenFile(entry, rpcId, args, log) {
     log.debug(`[mcp] Could not read ${filePath}: ${err.message}`);
   }
 
-  if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-    entry.mainWindow.webContents.send('mcp-open-file', entry.sessionId, {
+  {
+    emit(entry, 'mcp-open-file', entry.sessionId, {
       filePath,
       content,
       preview: preview ?? false,
@@ -267,9 +272,7 @@ async function handleCloseTab(entry, rpcId, args, log) {
       pending.resolve({ action: 'accept' });
 
       // Notify renderer to close the tab
-      if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-        entry.mainWindow.webContents.send('mcp-close-tab', entry.sessionId, diffId);
-      }
+      emit(entry, 'mcp-close-tab', entry.sessionId, diffId);
       break;
     }
   }
@@ -288,9 +291,7 @@ async function handleCloseAllDiffTabs(entry, rpcId, log) {
   }
   entry.pendingDiffs.clear();
 
-  if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-    entry.mainWindow.webContents.send('mcp-close-all-diffs', entry.sessionId);
-  }
+  emit(entry, 'mcp-close-all-diffs', entry.sessionId);
 
   sendResult(entry, rpcId, {
     content: [{ type: 'text', text: 'ok' }],
@@ -309,7 +310,43 @@ async function handleGetDiagnostics(entry, rpcId) {
  * Start an MCP WebSocket server for a session.
  * @returns {{ port: number, authToken: string }}
  */
-async function startMcpServer(sessionId, workspaceFolders, mainWindow, log) {
+// The bridge used to hold a BrowserWindow and call webContents.send directly.
+// It now runs inside the pty daemon, which outlives the window, so "the UI" is an
+// injected sink: { isAlive(), send(channel, ...payload) }. When no UI is attached
+// the bridge answers Claude itself rather than leaving it blocked.
+let defaultUi = null;
+
+function setUi(ui) {
+  defaultUi = ui;
+  for (const [, entry] of servers) entry.ui = ui;
+}
+
+function uiAlive(entry) {
+  const ui = entry.ui || defaultUi;
+  return !!(ui && ui.isAlive());
+}
+
+function emit(entry, channel, ...payload) {
+  const ui = entry.ui || defaultUi;
+  if (ui && ui.isAlive()) ui.send(channel, ...payload);
+}
+
+/**
+ * Resolve everything waiting on a human once the last UI detaches, so a session
+ * running unattended keeps making progress instead of blocking on a diff prompt
+ * nobody can see. TAB_CLOSED is the same answer Claude gets when the user closes
+ * a diff tab: it applies the edit itself, exactly as it would with no IDE at all.
+ */
+function releasePendingForUiGone() {
+  for (const [, entry] of servers) {
+    for (const [diffId, pending] of entry.pendingDiffs) {
+      pending.resolve({ action: 'accept' });
+      entry.pendingDiffs.delete(diffId);
+    }
+  }
+}
+
+async function startMcpServer(sessionId, workspaceFolders, ui, log) {
   ensureIdeDir();
 
   const port = await findFreePort();
@@ -342,7 +379,7 @@ async function startMcpServer(sessionId, workspaceFolders, mainWindow, log) {
     port,
     authToken,
     lockFilePath,
-    mainWindow,
+    ui: ui || defaultUi,
     ws: null,
     pendingDiffs: new Map(),
   };
@@ -485,4 +522,6 @@ module.exports = {
   resolvePendingDiff,
   rekeyMcpServer,
   cleanStaleLockFiles,
+  setUi,
+  releasePendingForUiGone,
 };

@@ -6,7 +6,9 @@ const os = require('os');
 const pty = require('node-pty');
 const log = require('electron-log');
 // getFolderIndexMtimeMs moved to session-cache.js
-const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolvePendingDiff, rekeyMcpServer, cleanStaleLockFiles } = require('./mcp-bridge');
+// PTY processes and the IDE MCP servers live in a separate daemon so sessions
+// survive quitting, reloading or updating the app — see pty-daemon.js.
+const { PtyClient, defaultSocketPath } = require('./pty-client');
 const { fetchAndTransformUsage } = require('./claude-auth');
 
 // SWITCHBOARD_DATA_DIR isolates a dev/test instance from the installed app:
@@ -68,6 +70,7 @@ if (app.isPackaged || process.env.FORCE_UPDATER) {
   });
 }
 const {
+  DATA_DIR,
   getMeta, getAllMeta, toggleStar, setName, setArchived,
   isCachePopulated, getAllCached, getCachedByFolder, getCachedFolder, getCachedSession, upsertCachedSessions,
   deleteCachedSession, deleteCachedFolder,
@@ -82,11 +85,95 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const PLANS_DIR = path.join(os.homedir(), '.claude', 'plans');
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const STATS_CACHE_PATH = path.join(CLAUDE_DIR, 'stats-cache.json');
-const MAX_BUFFER_SIZE = 256 * 1024;
 
-// Active PTY sessions
+// Active PTY sessions. The pty processes themselves belong to the daemon; each
+// entry here is the app's view of one — bookkeeping plus a handle to write to it.
 const activeSessions = new Map();
 let mainWindow = null;
+
+const ptyClient = new PtyClient({
+  socketPath: defaultSocketPath(DATA_DIR),
+  dataDir: DATA_DIR,
+  execPath: process.execPath,
+  daemonScript: path.join(__dirname, 'pty-daemon.js'),
+  appVersion: app.getVersion(),
+  log,
+});
+
+// MCP events originate in the daemon now; relay them to the renderer unchanged
+// so the file panel keeps receiving the same channels it always did.
+ptyClient.onMcpEvent((channel, payload) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, ...payload);
+  }
+});
+
+/**
+ * The slice of session bookkeeping that has to survive this process. The daemon
+ * stores it opaquely and hands it back on the next launch (see adoptDaemonSessions).
+ */
+function sessionState({ projectPath, projectFolder, knownJsonlFiles, sessionSlug, isPlainTerminal, sessionOptions, mcpPort }) {
+  return {
+    projectPath,
+    projectFolder,
+    knownJsonlFiles: knownJsonlFiles ? [...knownJsonlFiles] : [],
+    sessionSlug: sessionSlug || null,
+    isPlainTerminal: !!isPlainTerminal,
+    forkFrom: sessionOptions?.forkFrom || null,
+    mcpPort: mcpPort || null,
+    openedAt: Date.now(),
+  };
+}
+
+/**
+ * Wire the data/exit stream for one session and remember how to reach it.
+ * Called both for freshly spawned sessions and for sessions adopted from a
+ * daemon that outlived the previous app run.
+ */
+function trackSession(sessionId, session) {
+  activeSessions.set(sessionId, session);
+  ptyClient.onData(sessionId, (data, meta) => handleSessionData(session, sessionId, data, meta));
+  ptyClient.onExit(sessionId, (exitCode) => handleSessionExit(session, sessionId, exitCode));
+}
+
+/**
+ * Rebuild `activeSessions` from whatever the daemon is still running. Everything
+ * the app needs to keep managing a session is stored in the daemon's per-session
+ * `state` blob, because this process may be a completely new one.
+ */
+async function adoptDaemonSessions() {
+  let running = [];
+  try {
+    running = await ptyClient.list();
+  } catch (err) {
+    log.error(`[ptyd] could not list sessions: ${err.message}`);
+    return;
+  }
+  for (const { id, state } of running) {
+    const session = {
+      pty: ptyClient.handle(id),
+      rendererAttached: false,
+      exited: false,
+      outputBuffer: [], outputBufferSize: 0,
+      altScreen: !!state.altScreen,
+      projectPath: state.projectPath,
+      firstResize: true,
+      projectFolder: state.projectFolder,
+      knownJsonlFiles: new Set(state.knownJsonlFiles || []),
+      sessionSlug: state.sessionSlug || null,
+      isPlainTerminal: !!state.isPlainTerminal,
+      forkFrom: state.forkFrom || null,
+      mcpServer: state.mcpPort ? { port: state.mcpPort } : null,
+      _openedAt: state.openedAt || Date.now(),
+      _adopted: true,
+    };
+    trackSession(id, session);
+    log.info(`[ptyd] adopted running session ${id}`);
+  }
+  if (running.length > 0) {
+    log.info(`[ptyd] adopted ${running.length} session(s) that outlived the last app run`);
+  }
+}
 
 function createWindow() {
   // Restore saved window bounds
@@ -201,14 +288,11 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => {
-    // On macOS the app stays alive in the dock after the last window closes.
-    // Kill all running PTY processes so orphaned `claude` processes don't
-    // accumulate in the background with no way for the user to interact.
-    for (const [id, session] of activeSessions) {
-      if (!session.exited) {
-        try { session.pty.kill(); } catch {}
-      }
-      activeSessions.delete(id);
+    // Sessions live in the pty daemon and deliberately keep running: closing the
+    // window (or quitting entirely) must not interrupt a turn in progress. They
+    // are reattached — scrollback and all — the next time a window opens.
+    for (const [, session] of activeSessions) {
+      session.rendererAttached = false;
     }
     mainWindow = null;
   });
@@ -365,7 +449,7 @@ ipcMain.handle('clipboard-write-text', (_event, text) => {
 
 // --- IPC: MCP bridge ---
 ipcMain.on('mcp-diff-response', (_event, sessionId, diffId, action, editedContent) => {
-  resolvePendingDiff(sessionId, diffId, action, editedContent);
+  ptyClient.diffResponse(sessionId, diffId, action, editedContent);
 });
 
 ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
@@ -934,6 +1018,127 @@ ipcMain.handle('archive-session', (_event, sessionId, archived) => {
   return { archived: val };
 });
 
+// Everything the app derives from a session's output: busy state, iTerm2
+// notifications, alternate-screen tracking. The bytes now arrive over the daemon
+// socket instead of straight off a local pty, but the parsing is unchanged.
+//
+// Replayed scrollback is forwarded without parsing: those sequences were already
+// interpreted when they first arrived, and re-running them on every reattach
+// would re-fire stale notifications and busy-state flips.
+function handleSessionData(session, sessionId, data, meta = {}) {
+  const currentId = session.realSessionId || sessionId;
+
+  if (meta.replay) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('terminal-data', currentId, data);
+    }
+    return;
+  }
+
+  // Parse OSC sequences (title changes, progress, notifications, etc.)
+  if (data.includes('\x1b]')) {
+    const oscMatches = data.matchAll(/\x1b\](\d+);([^\x07\x1b]*)(?:\x07|\x1b\\)/g);
+    for (const m of oscMatches) {
+      const code = m[1];
+      const payload = m[2].slice(0, 120);
+      // Detect Claude CLI busy state from OSC 0 title (spinner chars = busy, ✳ = idle)
+      if (code === '0') {
+        const firstChar = payload.charAt(0);
+        const isBusy = firstChar.charCodeAt(0) >= 0x2800 && firstChar.charCodeAt(0) <= 0x28FF;
+        const isIdle = firstChar === '\u2733'; // ✳
+        log.debug(`[OSC 0] session=${currentId} char=U+${firstChar.charCodeAt(0).toString(16).toUpperCase()} busy=${isBusy} idle=${isIdle} wasBusy=${!!session._cliBusy}`);
+        if (isBusy && !session._cliBusy) {
+          session._cliBusy = true;
+          session._oscIdle = false;
+          log.debug(`[OSC 0] session=${currentId} → BUSY`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('cli-busy-state', currentId, true);
+          }
+        } else if (isIdle && session._cliBusy) {
+          session._cliBusy = false;
+          session._oscIdle = true;
+          log.debug(`[OSC 0] session=${currentId} → IDLE`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('cli-busy-state', currentId, false);
+          }
+        }
+      }
+    }
+    // Parse iTerm2 OSC 9 sequences (terminated by BEL \x07 or ST \x1b\\)
+    const osc9Matches = data.matchAll(/\x1b\]9;([^\x07\x1b]*)(?:\x07|\x1b\\)/g);
+    for (const osc9 of osc9Matches) {
+      const payload = osc9[1];
+      // OSC 9;4 progress: 4;0; = clear/done, 4;1;N = running at N%, 4;2;N = error, 4;3; = indeterminate
+      if (payload.startsWith('4;')) {
+        const level = payload.split(';')[1];
+        if (level === '0') continue; // 4;0 is also used for clearing, making it unreliable as an idle signal
+        log.debug(`[OSC 9;4] session=${currentId} level=${level} payload="${payload}" wasBusy=${!!session._cliBusy}`);
+        if ((level === '1' || level === '2' || level === '3') && !session._cliBusy) {
+          session._cliBusy = true;
+          session._oscIdle = false;
+          log.debug(`[OSC 9;4] session=${currentId} → BUSY`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('cli-busy-state', currentId, true);
+          }
+        }
+      } else {
+        // Regular notification (attention, permission, etc.)
+        log.info(`[OSC 9] session=${currentId} message="${payload}"`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('terminal-notification', currentId, payload);
+        }
+      }
+    }
+  }
+
+  // Standalone BEL (not part of an OSC sequence)
+  if (data.includes('\x07') && !data.includes('\x1b]')) {
+    log.info(`[BEL] session=${currentId}`);
+  }
+
+  // Track alternate screen mode (only if data contains the marker)
+  if (data.includes('\x1b[?')) {
+    if (data.includes('\x1b[?1049h') || data.includes('\x1b[?47h')) {
+      session.altScreen = true;
+      ptyClient.setState(currentId, { altScreen: true });
+      log.info(`[altscreen] session=${currentId} ON`);
+    }
+    if (data.includes('\x1b[?1049l') || data.includes('\x1b[?47l')) {
+      session.altScreen = false;
+      ptyClient.setState(currentId, { altScreen: false });
+      log.info(`[altscreen] session=${currentId} OFF`);
+    }
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('terminal-data', currentId, data);
+  }
+}
+
+// The daemon shuts the session's MCP server down as part of reaping the process,
+// so this only has to tell the renderer and forget our own bookkeeping.
+function handleSessionExit(session, sessionId, exitCode) {
+  session.exited = true;
+  session.mcpServer = null;
+
+  const realId = session.realSessionId || sessionId;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('process-exited', realId, exitCode);
+    // If a fork/plan-accept transition re-keyed this session under realId
+    // but the PTY exited before transition detection ran, also notify the
+    // renderer for the original sessionId so it doesn't stay stuck as "Running".
+    if (realId !== sessionId && activeSessions.has(sessionId)) {
+      mainWindow.webContents.send('process-exited', sessionId, exitCode);
+    }
+  }
+  activeSessions.delete(realId);
+  // Clean up the original key too in case transition detection hasn't run yet
+  activeSessions.delete(sessionId);
+  ptyClient.forgetSession(realId);
+  ptyClient.forgetSession(sessionId);
+}
+
+
 // --- IPC: open-terminal ---
 ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, sessionOptions) => {
   if (!mainWindow) return { ok: false, error: 'no window' };
@@ -949,9 +1154,12 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       mainWindow.webContents.send('terminal-data', sessionId, '\x1b[?1049h');
     }
 
-    // Send buffered output for reattach
-    for (const chunk of session.outputBuffer) {
-      mainWindow.webContents.send('terminal-data', sessionId, chunk);
+    // Replay the daemon's scrollback. It arrives as replay-tagged frames, which
+    // handleSessionData forwards to the renderer without re-parsing.
+    try {
+      await ptyClient.replay(sessionId);
+    } catch (err) {
+      log.error(`[ptyd] replay failed for ${sessionId}: ${err.message}`);
     }
 
     if (!session.isPlainTerminal) {
@@ -1034,11 +1242,13 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       // Plain terminal: interactive login shell, no claude command
       // Inject a shell function to override `claude` with a helpful message
       const claudeShim = 'claude() { echo "\\033[33mTo start a Claude session, use the + button in the sidebar.\\033[0m"; return 1; }; export -f claude 2>/dev/null;';
-      ptyProcess = pty.spawn(shell, shellArgs(shell, undefined, shellExtraArgs), {
-        name: 'xterm-256color',
+      ptyProcess = await ptyClient.spawn({
+        id: sessionId,
+        file: shell,
+        args: shellArgs(shell, undefined, shellExtraArgs),
+        cwd: isWsl ? os.homedir() : projectPath,
         cols: 120,
         rows: 30,
-        cwd: isWsl ? os.homedir() : projectPath,
         env: {
           ...cleanPtyEnv,
           TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'iTerm.app', TERM_PROGRAM_VERSION: '3.6.6', FORCE_COLOR: '3', ITERM_SESSION_ID: '1',
@@ -1047,14 +1257,11 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
           ENV: claudeShim,
           BASH_ENV: claudeShim,
         },
+        state: sessionState({ projectPath, projectFolder, knownJsonlFiles, sessionSlug, isPlainTerminal, sessionOptions }),
       });
       // For zsh, ENV/BASH_ENV don't apply — write the function after shell starts
       setTimeout(() => {
-        if (!ptyProcess._isDisposed) {
-          try {
-            ptyProcess.write(claudeShim + ' clear\n');
-          } catch {}
-        }
+        try { ptyProcess.write(claudeShim + ' clear\n'); } catch {}
       }, 300);
     } else {
       // Build claude command, using array to prevent accidental shell injection
@@ -1115,7 +1322,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       // (skip if user disabled IDE emulation in global settings)
       if (sessionOptions?.mcpEmulation !== false) {
         try {
-          mcpServer = await startMcpServer(sessionId, [projectPath], mainWindow, log);
+          mcpServer = await ptyClient.startMcp(sessionId, [projectPath]);
           claudeCmd += ' --ide';
         } catch (err) {
           log.error(`[mcp] Failed to start MCP server for ${sessionId}: ${err.message}`);
@@ -1131,15 +1338,18 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         ptyEnv.CLAUDE_CODE_SSE_PORT = String(mcpServer.port);
       }
 
-      ptyProcess = pty.spawn(shell, shellArgs(shell, claudeCmd, shellExtraArgs), {
-        name: 'xterm-256color',
+      ptyProcess = await ptyClient.spawn({
+        id: sessionId,
+        file: shell,
+        args: shellArgs(shell, claudeCmd, shellExtraArgs),
+        cwd: isWsl ? os.homedir() : projectPath,
         cols: 120,
         rows: 30,
-        cwd: isWsl ? os.homedir() : projectPath,
         // TERM_PROGRAM=iTerm.app: Claude Code checks this to decide whether to emit
         // OSC 9 notifications (e.g. "needs your attention"). Without it, the packaged
         // app's minimal Electron environment won't trigger those sequences.
         env: ptyEnv,
+        state: sessionState({ projectPath, projectFolder, knownJsonlFiles, sessionSlug, isPlainTerminal, sessionOptions, mcpPort: mcpServer?.port }),
       });
 
     }
@@ -1149,126 +1359,13 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
 
   const session = {
     pty: ptyProcess, rendererAttached: true, exited: false,
-    outputBuffer: [], outputBufferSize: 0, altScreen: false,
+    altScreen: false,
     projectPath, firstResize: true,
     projectFolder, knownJsonlFiles, sessionSlug,
     isPlainTerminal, forkFrom: sessionOptions?.forkFrom || null,
     mcpServer, _openedAt: Date.now(),
   };
-  activeSessions.set(sessionId, session);
-
-  ptyProcess.onData(data => {
-    const currentId = session.realSessionId || sessionId;
-
-    // Parse OSC sequences (title changes, progress, notifications, etc.)
-    if (data.includes('\x1b]')) {
-      const oscMatches = data.matchAll(/\x1b\](\d+);([^\x07\x1b]*)(?:\x07|\x1b\\)/g);
-      for (const m of oscMatches) {
-        const code = m[1];
-        const payload = m[2].slice(0, 120);
-        // Detect Claude CLI busy state from OSC 0 title (spinner chars = busy, ✳ = idle)
-        if (code === '0') {
-          const firstChar = payload.charAt(0);
-          const isBusy = firstChar.charCodeAt(0) >= 0x2800 && firstChar.charCodeAt(0) <= 0x28FF;
-          const isIdle = firstChar === '\u2733'; // ✳
-          log.debug(`[OSC 0] session=${currentId} char=U+${firstChar.charCodeAt(0).toString(16).toUpperCase()} busy=${isBusy} idle=${isIdle} wasBusy=${!!session._cliBusy}`);
-          if (isBusy && !session._cliBusy) {
-            session._cliBusy = true;
-            session._oscIdle = false;
-            log.debug(`[OSC 0] session=${currentId} → BUSY`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('cli-busy-state', currentId, true);
-            }
-          } else if (isIdle && session._cliBusy) {
-            session._cliBusy = false;
-            session._oscIdle = true;
-            log.debug(`[OSC 0] session=${currentId} → IDLE`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('cli-busy-state', currentId, false);
-            }
-          }
-        }
-      }
-      // Parse iTerm2 OSC 9 sequences (terminated by BEL \x07 or ST \x1b\\)
-      const osc9Matches = data.matchAll(/\x1b\]9;([^\x07\x1b]*)(?:\x07|\x1b\\)/g);
-      for (const osc9 of osc9Matches) {
-        const payload = osc9[1];
-        // OSC 9;4 progress: 4;0; = clear/done, 4;1;N = running at N%, 4;2;N = error, 4;3; = indeterminate
-        if (payload.startsWith('4;')) {
-          const level = payload.split(';')[1];
-          if (level === '0') continue; // 4;0 is also used for clearing, making it unreliable as an idle signal
-          log.debug(`[OSC 9;4] session=${currentId} level=${level} payload="${payload}" wasBusy=${!!session._cliBusy}`);
-          if ((level === '1' || level === '2' || level === '3') && !session._cliBusy) {
-            session._cliBusy = true;
-            session._oscIdle = false;
-            log.debug(`[OSC 9;4] session=${currentId} → BUSY`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('cli-busy-state', currentId, true);
-            }
-          }
-        } else {
-          // Regular notification (attention, permission, etc.)
-          log.info(`[OSC 9] session=${currentId} message="${payload}"`);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('terminal-notification', currentId, payload);
-          }
-        }
-      }
-    }
-
-    // Standalone BEL (not part of an OSC sequence)
-    if (data.includes('\x07') && !data.includes('\x1b]')) {
-      log.info(`[BEL] session=${currentId}`);
-    }
-
-    // Track alternate screen mode (only if data contains the marker)
-    if (data.includes('\x1b[?')) {
-      if (data.includes('\x1b[?1049h') || data.includes('\x1b[?47h')) {
-        session.altScreen = true;
-        log.info(`[altscreen] session=${currentId} ON`);
-      }
-      if (data.includes('\x1b[?1049l') || data.includes('\x1b[?47l')) {
-        session.altScreen = false;
-        log.info(`[altscreen] session=${currentId} OFF`);
-      }
-    }
-
-    // Buffer output (skip resize-triggered redraws for plain terminals)
-    if (!session._suppressBuffer) {
-      session.outputBuffer.push(data);
-      session.outputBufferSize += data.length;
-      while (session.outputBufferSize > MAX_BUFFER_SIZE && session.outputBuffer.length > 1) {
-        session.outputBufferSize -= session.outputBuffer.shift().length;
-      }
-    }
-
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('terminal-data', currentId, data);
-    }
-  });
-
-  ptyProcess.onExit(({ exitCode }) => {
-    session.exited = true;
-    // Clean up MCP server
-    const mcpId = session.realSessionId || sessionId;
-    shutdownMcpServer(mcpId);
-    session.mcpServer = null;
-
-    const realId = session.realSessionId || sessionId;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('process-exited', realId, exitCode);
-      // If a fork/plan-accept transition re-keyed this session under realId
-      // but the PTY exited before transition detection ran, also notify the
-      // renderer for the original sessionId so it doesn't stay stuck as "Running".
-      if (realId !== sessionId && activeSessions.has(sessionId)) {
-        mainWindow.webContents.send('process-exited', sessionId, exitCode);
-      }
-    }
-    activeSessions.delete(realId);
-    // Clean up the original key too in case transition detection hasn't run yet
-    activeSessions.delete(sessionId);
-  });
-
+  trackSession(sessionId, session);
   if (sessionOptions?.forkFrom) {
     log.info(`[fork-spawn] tempId=${sessionId} forkFrom=${sessionOptions.forkFrom} folder=${projectFolder} knownFiles=${knownJsonlFiles.size}`);
   }
@@ -1290,12 +1387,12 @@ ipcMain.on('terminal-resize', (_event, sessionId, cols, rows) => {
   if (session && !session.exited) {
     // For plain terminals, suppress buffering during resize to avoid
     // accumulating prompt redraws that pollute reattach replay
-    if (session.isPlainTerminal) session._suppressBuffer = true;
+    if (session.isPlainTerminal) session.pty.setSuppressBuffer(true);
 
     session.pty.resize(cols, rows);
 
     if (session.isPlainTerminal) {
-      setTimeout(() => { session._suppressBuffer = false; }, 200);
+      setTimeout(() => session.pty.setSuppressBuffer(false), 200);
     }
 
     // First resize: nudge to force TUI redraw on reattach (skip for plain terminals — causes duplicate prompts)
@@ -1326,7 +1423,25 @@ ipcMain.on('close-terminal', (_event, sessionId) => {
 
 // Session transitions → session-transitions.js
 const sessionTransitions = require('./session-transitions');
-sessionTransitions.init({ PROJECTS_DIR, activeSessions, getMainWindow: () => mainWindow, log, rekeyMcpServer });
+sessionTransitions.init({
+  PROJECTS_DIR, activeSessions, getMainWindow: () => mainWindow, log,
+  // Re-keying has to reach the daemon as well: it keys sessions, their output
+  // frames and their MCP server by the same id.
+  rekeyMcpServer: (oldId, newId) => {
+    ptyClient.rekey(oldId, newId).then(() => {
+      // Persist what the transition changed, so a later app run adopts the
+      // session with an up-to-date view and can still spot the next transition.
+      const session = activeSessions.get(newId);
+      if (session) {
+        ptyClient.setState(newId, {
+          knownJsonlFiles: [...session.knownJsonlFiles],
+          sessionSlug: session.sessionSlug || null,
+          realSessionId: session.realSessionId || null,
+        });
+      }
+    }).catch((err) => log.error(`[ptyd] rekey failed: ${err.message}`));
+  },
+});
 const { detectSessionTransitions } = sessionTransitions;
 
 // --- fs.watch on projects directory ---
@@ -1427,8 +1542,21 @@ if (!gotSingleInstanceLock) {
     }
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     buildMenu();
+
+    // Reach the pty daemon before showing a window: any session still running
+    // from a previous app run has to be adopted first, or the sidebar would show
+    // it as stopped and a click would try to spawn a second process for it.
+    try {
+      const hello = await ptyClient.connect();
+      log.info(`[ptyd] connected (pid ${hello.pid}, protocol v${hello.version})`);
+      ptyClient.cleanStaleLocks();
+      await adoptDaemonSessions();
+    } catch (err) {
+      log.error(`[ptyd] unavailable: ${err.message}`);
+    }
+
     createWindow();
     startProjectsWatcher();
     scheduleIpc.ensureScheduleCreatorCommand();
@@ -1489,21 +1617,17 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  // Shut down all MCP servers
-  shutdownAllMcp();
-
   // Close filesystem watcher
   if (projectsWatcher) {
     projectsWatcher.close();
     projectsWatcher = null;
   }
 
-  // Kill all PTY processes on quit
-  for (const [, session] of activeSessions) {
-    if (!session.exited) {
-      try { session.pty.kill(); } catch {}
-    }
-  }
+  // PTY processes and their MCP servers stay up: they belong to the daemon, and
+  // surviving a quit is the point. Stopping a session is an explicit user action
+  // (the stop button), never a side effect of closing the app.
+  const live = [...activeSessions.values()].filter(s => !s.exited).length;
+  if (live > 0) log.info(`[ptyd] leaving ${live} session(s) running in the daemon`);
 });
 
 // Close SQLite after all windows are closed to avoid "connection is not open" errors
