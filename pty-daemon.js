@@ -104,6 +104,7 @@ function spawnSession(msg) {
 
   const session = {
     pty: proc,
+    startedAt: Date.now(),
     state: state || {},
     buffer: [],
     bufferSize: 0,
@@ -154,7 +155,7 @@ function listSessions() {
   const out = [];
   for (const [id, s] of sessions) {
     if (s.exited) continue;
-    out.push({ id, state: s.state, pid: s.pty.pid });
+    out.push({ id, state: s.state, pid: s.pty.pid, startedAt: s.startedAt || null });
   }
   return out;
 }

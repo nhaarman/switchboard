@@ -81,6 +81,8 @@ const {
   closeDb,
 } = require('./db');
 
+const { SessionAgents } = require('./subagent-watch');
+
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const PLANS_DIR = path.join(os.homedir(), '.claude', 'plans');
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
@@ -149,7 +151,7 @@ async function adoptDaemonSessions() {
     log.error(`[ptyd] could not list sessions: ${err.message}`);
     return;
   }
-  for (const { id, state } of running) {
+  for (const { id, state, startedAt } of running) {
     const session = {
       pty: ptyClient.handle(id),
       rendererAttached: false,
@@ -165,6 +167,7 @@ async function adoptDaemonSessions() {
       forkFrom: state.forkFrom || null,
       mcpServer: state.mcpPort ? { port: state.mcpPort } : null,
       _openedAt: state.openedAt || Date.now(),
+      _ptyStartedAt: startedAt || 0,
       _adopted: true,
     };
     trackSession(id, session);
@@ -1018,22 +1021,67 @@ ipcMain.handle('archive-session', (_event, sessionId, archived) => {
   return { archived: val };
 });
 
-// One place to push busy state at the renderer, so every signal that flips
-// _cliBusy reports through the same deduplicated path.
-//
-// Note this tracks the CLI's own turn only. A session whose agents were sent to
-// the background while the main loop sits at the prompt reports idle: the
-// footer's "N agents" count stays up after they finish, so it can't tell live
-// agents from finished ones.
+// A session is working when its own turn is running (the OSC 0 spinner, OSC 9;4
+// progress) OR when background agents are still going. Those are independent:
+// the CLI parks its spinner at the prompt while backgrounded agents keep
+// working, and a turn can run with no agents at all. Both flags feed one
+// effective state so neither can clear the other's signal.
 function emitBusyState(session, sessionId) {
-  const busy = !!session._cliBusy;
+  const busy = !!session._cliBusy || !!session._agentsBusy;
   if (busy === session._emittedBusy) return;
   session._emittedBusy = busy;
-  log.debug(`[busy] session=${sessionId} → ${busy ? 'BUSY' : 'IDLE'}`);
+  log.debug(`[busy] session=${sessionId} → ${busy ? 'BUSY' : 'IDLE'} (cli=${!!session._cliBusy} agents=${!!session._agentsBusy})`);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('cli-busy-state', sessionId, busy);
   }
 }
+
+// Background agents leave no trace in the terminal stream once the main loop
+// goes quiet, so they are polled off the CLI's own state files instead. Watchers
+// are kept per session because each one only reads what its transcript appended
+// since the last pass. See subagent-watch.js for how live is decided.
+const AGENT_POLL_MS = 4000;
+const agentWatchers = new Map(); // sessionId → SessionAgents
+
+function agentWatcherFor(session, sessionId) {
+  let watcher = agentWatchers.get(sessionId);
+  if (!watcher) {
+    const folder = session.projectFolder || getCachedFolder(sessionId);
+    if (!folder) return null;
+    watcher = new SessionAgents(
+      path.join(PROJECTS_DIR, folder, sessionId),
+      path.join(PROJECTS_DIR, folder, `${sessionId}.jsonl`),
+    );
+    agentWatchers.set(sessionId, watcher);
+  }
+  return watcher;
+}
+
+function pollBackgroundAgents() {
+  for (const [sessionId, session] of activeSessions) {
+    if (session.exited) continue;
+    const currentId = session.realSessionId || sessionId;
+    const watcher = agentWatcherFor(session, currentId);
+    if (!watcher) continue;
+
+    let live = 0;
+    try {
+      ({ live } = watcher.poll(session._ptyStartedAt || 0));
+    } catch (err) {
+      log.debug(`[agents] session=${currentId} poll failed: ${err.message}`);
+      continue;
+    }
+
+    const busy = live > 0;
+    if (busy !== !!session._agentsBusy) {
+      session._agentsBusy = busy;
+      log.info(`[agents] session=${currentId} ${busy ? `${live} agent(s) running` : 'all agents finished'}`);
+      emitBusyState(session, currentId);
+    }
+  }
+}
+
+setInterval(pollBackgroundAgents, AGENT_POLL_MS).unref();
 
 // Everything the app derives from a session's output: busy state, iTerm2
 // notifications, alternate-screen tracking. The bytes now arrive over the daemon
@@ -1134,6 +1182,8 @@ function handleSessionExit(session, sessionId, exitCode) {
   session.mcpServer = null;
 
   const realId = session.realSessionId || sessionId;
+  agentWatchers.delete(sessionId);
+  agentWatchers.delete(realId);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('process-exited', realId, exitCode);
     // If a fork/plan-accept transition re-keyed this session under realId
@@ -1375,7 +1425,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
     projectPath, firstResize: true,
     projectFolder, knownJsonlFiles, sessionSlug,
     isPlainTerminal, forkFrom: sessionOptions?.forkFrom || null,
-    mcpServer, _openedAt: Date.now(),
+    mcpServer, _openedAt: Date.now(), _ptyStartedAt: Date.now(),
   };
   trackSession(sessionId, session);
   if (sessionOptions?.forkFrom) {
