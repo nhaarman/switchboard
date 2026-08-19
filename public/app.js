@@ -40,6 +40,7 @@ const terminalArea = document.getElementById('terminal-area');
 const settingsViewer = document.getElementById('settings-viewer');
 const globalSettingsBtn = document.getElementById('global-settings-btn');
 const addProjectBtn = document.getElementById('add-project-btn');
+const newSessionBtn = document.getElementById('new-session-btn');
 const resortBtn = document.getElementById('resort-btn');
 const jsonlViewer = document.getElementById('jsonl-viewer');
 const jsonlViewerTitle = document.getElementById('jsonl-viewer-title');
@@ -76,10 +77,10 @@ let showTodayOnly = false;
 let cachedProjects = [];
 let cachedAllProjects = [];
 let activePtyIds = new Set();
-let sortedOrder = []; // [{ projectPath, itemIds: [itemId, ...] }, ...] — single source of truth for sidebar order
+let sortedOrder = []; // [itemId, ...] — flat render order of the session list, source of truth between renders
 let activeTab = 'sessions';
 let cachedPlans = [];
-let visibleSessionCount = 10;
+let visibleSessionCount = 25;
 let sessionMaxAgeDays = 3;
 const pendingSessions = new Map(); // sessionId → { session, projectPath, folder }
 
@@ -366,15 +367,16 @@ function refreshSidebar({ resort = false } = {}) {
       const hasMatchingSessions = p.sessions.some(s => searchMatchIds.has(s.sessionId));
       const projectMatched = searchMatchProjectPaths && searchMatchProjectPaths.has(p.projectPath);
       if (!hasMatchingSessions && !projectMatched) return null;
+      // A project whose name matches contributes all of its sessions — there
+      // is no directory header left to stand in for the project itself.
       return {
         ...p,
-        sessions: hasMatchingSessions ? p.sessions.filter(s => searchMatchIds.has(s.sessionId)) : [],
-        _projectMatchedOnly: projectMatched && !hasMatchingSessions,
+        sessions: hasMatchingSessions ? p.sessions.filter(s => searchMatchIds.has(s.sessionId)) : p.sessions,
       };
     }).filter(Boolean);
   }
 
-  renderProjects(projects, resort);
+  renderSessionList(projects, resort);
 }
 
 // --- Archive toggle ---
@@ -422,6 +424,11 @@ globalSettingsBtn.addEventListener('click', () => {
 // --- Add project button ---
 addProjectBtn.addEventListener('click', () => {
   showAddProjectDialog();
+});
+
+// --- New session (project picker) ---
+newSessionBtn.addEventListener('click', () => {
+  showProjectPickerDialog();
 });
 
 // --- Search (debounced, per-tab FTS) ---
@@ -714,7 +721,7 @@ async function loadProjects({ resort = false } = {}) {
   renderDefaultStatus();
 }
 
-// Sidebar rendering (slugId, folderId, buildSlugGroup, renderProjects,
+// Sidebar rendering (slugId, projectLabel, buildSlugGroup, renderSessionList,
 // rebindSidebarEvents, buildSessionItem, startRename) → sidebar.js
 
 
@@ -931,7 +938,8 @@ initGridObservers();
 
 
 // Dialogs (resolveDefaultSessionOptions, forkSession, showNewSessionPopover,
-// showNewSessionDialog, showResumeSessionDialog, showAddProjectDialog, launchTerminalSession) → dialogs.js
+// showNewSessionDialog, showResumeSessionDialog, showProjectPickerDialog,
+// showAddProjectDialog, launchTerminalSession) → dialogs.js
 
 
 // --- Sidebar toggle ---

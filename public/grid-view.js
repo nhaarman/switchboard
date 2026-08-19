@@ -3,7 +3,7 @@
 // with an in-place card overlay (header/footer) and switch #terminals to grid layout.
 //
 // Depends on globals from app.js: openSessions, activeSessionId, sessionMap, activePtyIds,
-// sortedOrder, sidebarContent, terminalsEl, gridViewActive, gridViewer, gridViewerCount,
+// sidebarContent, terminalsEl, gridViewActive, gridViewer, gridViewerCount,
 // placeholder, terminalHeader, planViewer, statsViewer, memoryViewer, settingsViewer,
 // jsonlViewer, terminalArea, cachedProjects, isMac
 // Depends on: cleanDisplayName, formatDate (utils.js), fitAndScroll, showSession (terminal-manager.js)
@@ -65,46 +65,9 @@ function wrapInGridCard(sessionId) {
   card.appendChild(entry.element);
   card.appendChild(footer);
 
-  // Insert card into the correct project group in the grid
-  if (gridViewActive) {
-    const pp = session.projectPath || '';
-    // Find or create the project heading for this session
-    let targetHeading = null;
-    for (const h of terminalsEl.querySelectorAll('.grid-project-heading')) {
-      if (h.dataset.projectPath === pp) { targetHeading = h; break; }
-    }
-    if (!targetHeading) {
-      targetHeading = document.createElement('div');
-      targetHeading.className = 'grid-project-heading';
-      targetHeading.dataset.projectPath = pp;
-      targetHeading.textContent = pp ? shortProjectPath(pp) : 'Other';
-      // Insert heading in sortedOrder position
-      const orderIndex = new Map(sortedOrder.map((e, i) => [e.projectPath, i]));
-      const myIdx = orderIndex.get(pp);
-      let inserted = false;
-      if (myIdx !== undefined) {
-        for (const h of terminalsEl.querySelectorAll('.grid-project-heading')) {
-          const hIdx = orderIndex.get(h.dataset.projectPath);
-          if (hIdx !== undefined && hIdx > myIdx) {
-            terminalsEl.insertBefore(targetHeading, h);
-            inserted = true;
-            break;
-          }
-        }
-      }
-      if (!inserted) terminalsEl.appendChild(targetHeading);
-    }
-    // Insert card after the heading and any existing cards in this group
-    // (find next heading or end of container)
-    let insertBefore = targetHeading.nextSibling;
-    while (insertBefore && !insertBefore.classList.contains('grid-project-heading')) {
-      insertBefore = insertBefore.nextSibling;
-    }
-    terminalsEl.insertBefore(card, insertBefore);
-  } else {
-    // Not in grid view — just place where the terminal container was
-    terminalsEl.appendChild(card);
-  }
+  // The sidebar list is flat, so the grid is too: cards sit in sidebar order
+  // with no per-directory headings.
+  terminalsEl.appendChild(card);
 
   // Click header or footer to focus
   header.addEventListener('mousedown', (e) => {
@@ -145,7 +108,7 @@ function unwrapGridCards() {
     card.remove();
   }
   gridCards.clear();
-  // Remove project headings inserted by showGridView
+  // Clean up project headings from a pre-flat-list grid layout
   terminalsEl.querySelectorAll('.grid-project-heading').forEach(el => el.remove());
 }
 
@@ -191,41 +154,13 @@ function showGridView() {
     if (!entry.closed) openSet.add(sid);
   }
 
-  // Use cachedProjects sorted by sortedOrder — same grouping & order as sidebar
-  let projects = [...cachedProjects];
-  if (sortedOrder.length > 0) {
-    const orderIndex = new Map(sortedOrder.map((e, i) => [e.projectPath, i]));
-    projects.sort((a, b) => {
-      const aPos = orderIndex.get(a.projectPath);
-      const bPos = orderIndex.get(b.projectPath);
-      if (aPos !== undefined && bPos !== undefined) return aPos - bPos;
-      if (aPos === undefined && bPos !== undefined) return -1;
-      if (aPos !== undefined && bPos === undefined) return 1;
-      return 0;
-    });
-  }
-
-  // Hide all terminals first, then wrap cards in sidebar order (grouped by project)
+  // Hide all terminals first, then wrap cards in sidebar order
   document.querySelectorAll('.terminal-container').forEach(el => el.classList.remove('visible'));
   const sessionIds = [];
-  // Walk sidebar items to get sessions in display order, grouped by project
   const sidebarItems = sidebarContent.querySelectorAll('.session-item[data-session-id]');
-  let currentProjectPath = null;
   for (const item of sidebarItems) {
     const sid = item.dataset.sessionId;
     if (!openSet.has(sid)) continue;
-    // Determine project path for this session
-    const session = sessionMap.get(sid);
-    const projectPath = session ? session.projectPath : null;
-    // Add project heading when project changes
-    if (projectPath && projectPath !== currentProjectPath) {
-      currentProjectPath = projectPath;
-      const heading = document.createElement('div');
-      heading.className = 'grid-project-heading';
-      heading.dataset.projectPath = projectPath;
-      heading.textContent = shortProjectPath(projectPath);
-      terminalsEl.appendChild(heading);
-    }
     wrapInGridCard(sid);
     sessionIds.push(sid);
   }
@@ -325,8 +260,8 @@ function navigateSession(direction) {
   }
 }
 
-// Navigate the grid in 2D by visual position using bounding rects.
-// Project headings break the simple index math, so we use actual screen positions.
+// Navigate the grid in 2D by visual position using bounding rects, so wrapping
+// rows and varying card sizes don't break the math.
 function navigateGrid(direction) {
   if (!gridViewActive) return;
   const cards = [...terminalsEl.querySelectorAll('.grid-card')];

@@ -8,7 +8,7 @@ Switchboard is a desktop app that gives you a unified view of all your Claude Co
 
 ### Key Features
 
-- **Session Browser** — All your Claude Code sessions, organized by project, searchable by content
+- **Session Browser** — All your Claude Code sessions in one flat list — active sessions always on top, most recent first — searchable by content
 - **Built-in Terminal** — Connect to running sessions or launch new ones without leaving the app
 - **Status Notifications** — In-app alerts when a session is waiting for permission approval or user input
 - **Fork & Resume** — Branch off from any point in a session's history
@@ -20,7 +20,7 @@ Switchboard is a desktop app that gives you a unified view of all your Claude Co
 
 ## Session Grid Overview
 
-Toggle the grid overview from the sidebar for a bird's-eye view of all your open sessions at once, grouped by project.
+Toggle the grid overview from the sidebar for a bird's-eye view of all your open sessions at once, in the same order as the sidebar list.
 
 ![Session Grid Overview](build/screenshot-grid.png)
 

@@ -417,6 +417,160 @@ async function showResumeSessionDialog(session) {
 // Settings viewer is in settings-panel.js (openSettingsViewer / closeSettingsViewer)
 // Global settings button & add project button bindings are in app.js (need DOM refs)
 
+
+// Instant hover label. The native `title` tooltip takes a beat to appear and is
+// easy to miss on icon-only buttons, so the picker paints its own.
+function setTooltip(el, text) {
+  el.dataset.tooltip = text;
+  el.setAttribute('aria-label', text);
+}
+
+// --- Project picker ---
+// The session list is flat, so there are no per-directory headers to hang the
+// project actions off. This dialog is where you pick a project to start a
+// session in, and where each project's own actions live.
+function showProjectPickerDialog() {
+  const overlay = document.createElement('div');
+  overlay.className = 'add-project-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'add-project-dialog project-picker-dialog';
+  dialog.innerHTML = `
+    <h3>New Session</h3>
+    <input type="text" class="project-picker-filter" placeholder="Filter projects..." autocomplete="off" spellcheck="false">
+    <div class="project-picker-list"></div>
+  `;
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  const filterInput = dialog.querySelector('.project-picker-filter');
+  const listEl = dialog.querySelector('.project-picker-list');
+
+  function close() {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  }
+
+  function mostRecent(project) {
+    let max = 0;
+    for (const s of project.sessions) {
+      const t = new Date(s.modified).getTime();
+      if (t > max) max = t;
+    }
+    return max;
+  }
+
+  function render() {
+    const query = filterInput.value.trim().toLowerCase();
+    const projects = [...cachedProjects]
+      .filter(p => !query || projectLabel(p.projectPath).toLowerCase().includes(query) || p.projectPath.toLowerCase().includes(query))
+      .sort((a, b) => mostRecent(b) - mostRecent(a));
+
+    listEl.innerHTML = '';
+    if (projects.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'project-picker-empty';
+      empty.textContent = 'No matching projects.';
+      listEl.appendChild(empty);
+      return;
+    }
+
+    for (const project of projects) {
+      const row = document.createElement('div');
+      row.className = 'project-picker-row';
+
+      const name = document.createElement('div');
+      name.className = 'project-picker-name';
+      name.textContent = projectLabel(project.projectPath);
+      name.title = project.projectPath;
+
+      const count = document.createElement('span');
+      count.className = 'project-picker-count';
+      const live = project.sessions.filter(s => activePtyIds.has(s.sessionId)).length;
+      count.textContent = live > 0 ? `${live} running` : `${project.sessions.length} sessions`;
+      if (live > 0) count.classList.add('running');
+
+      const actions = document.createElement('div');
+      actions.className = 'project-picker-actions';
+
+      const scheduleBtn = document.createElement('button');
+      scheduleBtn.className = 'picker-schedule-btn';
+      setTooltip(scheduleBtn, 'Create scheduled task');
+      scheduleBtn.innerHTML = ICONS.schedule(16);
+      scheduleBtn.onclick = (e) => { e.stopPropagation(); close(); launchScheduleCreator(project); };
+
+      const settingsBtn = document.createElement('button');
+      settingsBtn.className = 'picker-settings-btn';
+      setTooltip(settingsBtn, 'Project settings');
+      settingsBtn.innerHTML = ICONS.gear(16);
+      settingsBtn.onclick = (e) => { e.stopPropagation(); close(); openSettingsViewer('project', project.projectPath); };
+
+      const archiveBtn = document.createElement('button');
+      archiveBtn.className = 'picker-archive-btn';
+      setTooltip(archiveBtn, 'Archive all sessions in this project');
+      archiveBtn.innerHTML = ICONS.archive(18);
+      archiveBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const sessions = project.sessions.filter(s => !s.archived);
+        if (sessions.length === 0) return;
+        if (!confirm(`Archive all ${sessions.length} session${sessions.length > 1 ? 's' : ''} in ${projectLabel(project.projectPath)}?`)) return;
+        for (const s of sessions) {
+          if (activePtyIds.has(s.sessionId)) await window.api.stopSession(s.sessionId);
+          await window.api.archiveSession(s.sessionId, 1);
+          s.archived = 1;
+        }
+        pollActiveSessions();
+        loadProjects();
+        render();
+      };
+
+      actions.append(scheduleBtn, settingsBtn, archiveBtn);
+
+      if (/\/\.claude\/worktrees\//.test(project.projectPath)) {
+        const hideBtn = document.createElement('button');
+        hideBtn.className = 'picker-hide-btn';
+        setTooltip(hideBtn, 'Hide worktree');
+        hideBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+        hideBtn.onclick = async (e) => {
+          e.stopPropagation();
+          const name = project.projectPath.split('/').pop();
+          if (!confirm(`Hide worktree "${name}"?\n\nSession files are not deleted.`)) return;
+          await window.api.removeProject(project.projectPath);
+          loadProjects();
+          render();
+        };
+        actions.appendChild(hideBtn);
+      }
+
+      row.append(name, count, actions);
+      row.onclick = () => {
+        // Capture the anchor rect before closing — the row is detached by then,
+        // and a detached element measures as 0x0 at the top-left corner.
+        const rect = row.getBoundingClientRect();
+        close();
+        showNewSessionPopover(project, { getBoundingClientRect: () => rect });
+      };
+      listEl.appendChild(row);
+    }
+  }
+
+  filterInput.addEventListener('input', render);
+  filterInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const first = listEl.querySelector('.project-picker-row');
+      if (first) first.click();
+    }
+  });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('keydown', onKey);
+
+  render();
+  filterInput.focus();
+}
+
 function showAddProjectDialog() {
   const overlay = document.createElement('div');
   overlay.className = 'add-project-overlay';
@@ -426,7 +580,7 @@ function showAddProjectDialog() {
 
   dialog.innerHTML = `
     <h3>Add Project</h3>
-    <div class="add-project-hint">Select a folder to create a new project. To start a session in an existing project, use the + on its project header.</div>
+    <div class="add-project-hint">Select a folder to create a new project. To start a session in an existing project, use the + button above the session list.</div>
     <div class="folder-input-row">
       <input type="text" id="add-project-path" placeholder="/path/to/project" autocomplete="off" spellcheck="false">
       <button class="add-project-browse-btn">Browse</button>

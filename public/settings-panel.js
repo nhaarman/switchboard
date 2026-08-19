@@ -69,7 +69,7 @@
     const chromeValue = fieldValue('chrome', false);
     const preLaunchValue = fieldValue('preLaunchCmd', '');
     const addDirsValue = fieldValue('addDirs', '');
-    const visCountValue = fieldValue('visibleSessionCount', 10);
+    const visCountValue = fieldValue('visibleSessionCount', 25);
     const maxAgeValue = fieldValue('sessionMaxAgeDays', 3);
     const themeValue = fieldValue('terminalTheme', 'switchboard');
     const mcpEmulationValue = fieldValue('mcpEmulation', true);
@@ -207,7 +207,7 @@
         <div class="settings-field">
           <div class="settings-field-info">
             <span class="settings-label">Max Visible Sessions</span>
-            <div class="settings-description">Show up to this many sessions before collapsing the rest behind "+N older"</div>
+            <div class="settings-description">Show up to this many sessions in the list before collapsing the rest behind "+N older". Active and pinned sessions are always shown.</div>
           </div>
           <div class="settings-field-control">
             <input type="number" class="settings-input settings-input-compact" id="sv-visible-count" min="1" max="100" value="${visCountValue}">
@@ -300,7 +300,7 @@
         settings.chrome = settingsViewerBody.querySelector('#sv-chrome').checked;
         settings.preLaunchCmd = settingsViewerBody.querySelector('#sv-pre-launch').value.trim();
         settings.addDirs = settingsViewerBody.querySelector('#sv-add-dirs').value.trim();
-        settings.visibleSessionCount = parseInt(settingsViewerBody.querySelector('#sv-visible-count').value) || 10;
+        settings.visibleSessionCount = parseInt(settingsViewerBody.querySelector('#sv-visible-count').value) || 25;
         settings.sessionMaxAgeDays = parseInt(settingsViewerBody.querySelector('#sv-max-age').value) || 3;
         settings.terminalTheme = settingsViewerBody.querySelector('#sv-terminal-theme').value || 'switchboard';
         settings.mcpEmulation = settingsViewerBody.querySelector('#sv-mcp-emulation').checked;
