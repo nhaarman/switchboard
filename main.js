@@ -1486,7 +1486,7 @@ ipcMain.on('close-terminal', (_event, sessionId) => {
 // Session transitions → session-transitions.js
 const sessionTransitions = require('./session-transitions');
 sessionTransitions.init({
-  PROJECTS_DIR, activeSessions, getMainWindow: () => mainWindow, log,
+  PROJECTS_DIR, activeSessions, getMainWindow: () => mainWindow, log, emitBusyState,
   // Re-keying has to reach the daemon as well: it keys sessions, their output
   // frames and their MCP server by the same id.
   rekeyMcpServer: (oldId, newId) => {

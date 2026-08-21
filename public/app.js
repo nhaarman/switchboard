@@ -145,6 +145,13 @@ function setActivity(sessionId, active) {
     const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
     if (item) item.classList.toggle('cli-busy', active);
   }
+
+  // A busy↔idle flip changes the session's tier (Working ↔ Ready), but the
+  // section grouping is only recomputed on a resort — toggling a class leaves the
+  // row under its old header. This is what stranded a background-working session
+  // under "Ready": the poller marked it busy but nothing re-sorted the list. Only
+  // real transitions reach here (the main process dedupes), so resorting is cheap.
+  if (wasActive !== active) refreshSidebar({ resort: true });
 }
 
 function clearUnread(sessionId) {
@@ -246,6 +253,11 @@ window.api.onSessionForked((oldId, newId) => {
 
   openSessions.delete(oldId);
   openSessions.set(newId, entry);
+
+  // Re-key activity state (busy / unread / needs-input) so a session that keeps
+  // working across the fork — e.g. one waiting on a background agent — doesn't
+  // get stranded showing "Ready" with its busy flag left under the old id.
+  rekeySessionActivity(oldId, newId, { sessionBusyState, responseReadySessions, attentionSessions });
 
   // Re-key file panel state for the new session ID
   if (typeof rekeyFilePanelState === 'function') rekeyFilePanelState(oldId, newId);

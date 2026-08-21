@@ -5,7 +5,7 @@ const fs = require('fs');
  * Fork / plan-accept detection for active PTY sessions.
  * Call init(ctx) once with shared context.
  */
-let PROJECTS_DIR, activeSessions, getMainWindow, log, rekeyMcpServer;
+let PROJECTS_DIR, activeSessions, getMainWindow, log, rekeyMcpServer, emitBusyState;
 
 function init(ctx) {
   PROJECTS_DIR = ctx.PROJECTS_DIR;
@@ -13,6 +13,7 @@ function init(ctx) {
   getMainWindow = ctx.getMainWindow;
   log = ctx.log;
   rekeyMcpServer = ctx.rekeyMcpServer;
+  emitBusyState = ctx.emitBusyState;
 }
 
 // --- Fork / plan-accept detection ---
@@ -182,6 +183,14 @@ function detectSessionTransitions(folder) {
         const mainWindow = getMainWindow();
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('session-forked', sessionId, newId);
+        }
+        // Re-assert the busy state under the new id. emitBusyState only pushes on
+        // a change, so a session that was already busy before the fork would never
+        // send its state under newId; clearing the last-emitted memo forces the
+        // next emit through, keeping a background-working session out of "Ready".
+        if (emitBusyState) {
+          session._emittedBusy = undefined;
+          emitBusyState(session, newId);
         }
         break; // Only one transition per session per flush
       }
