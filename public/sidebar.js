@@ -507,6 +507,7 @@ function buildSessionItem(session, projectPath) {
   item.className = 'session-item';
   item.id = 'si-' + session.sessionId;
   if (session.type === 'terminal') item.classList.add('is-terminal');
+  if (session.launchFailed) item.classList.add('launch-failed');
   if (session.archived) item.classList.add('archived-item');
   if (activePtyIds.has(session.sessionId)) item.classList.add('has-running-pty');
   if (attentionSessions.has(session.sessionId)) item.classList.add('needs-attention');
@@ -573,6 +574,15 @@ function buildSessionItem(session, projectPath) {
   }
   info.appendChild(summaryEl);
   info.appendChild(metaEl);
+
+  // Failed launch (e.g. `--worktree` on a pre-existing branch): the session never
+  // produced a transcript. Make it read as failed and hint that clicking retries.
+  if (session.launchFailed) {
+    const failEl = document.createElement('div');
+    failEl.className = 'session-launch-failed';
+    failEl.textContent = 'launch failed · click to retry';
+    info.appendChild(failEl);
+  }
 
   // Action buttons container
   const actions = document.createElement('div');

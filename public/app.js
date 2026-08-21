@@ -327,6 +327,20 @@ window.api.onProcessExited((sessionId, exitCode) => {
     gridViewerCount.textContent = gridCards.size + ' session' + (gridCards.size !== 1 ? 's' : '');
   }
 
+  // A new Claude session whose PTY exited before writing any transcript never
+  // really started — e.g. `claude --worktree` bailing out because the target
+  // branch already exists. Without this, the pending card lingers as an
+  // unopenable "New session" whose only click behavior is a doomed --resume of
+  // a session id that was never created. Flag it so the sidebar shows a failed
+  // state, and let clicking it re-attempt the original launch (see openSession).
+  if (pendingSessions.has(sessionId)) {
+    const p = pendingSessions.get(sessionId);
+    if (p && p.session) {
+      p.session.launchFailed = exitCode !== 0;
+      refreshSidebar();
+    }
+  }
+
   pollActiveSessions();
 });
 
@@ -747,9 +761,10 @@ async function launchNewSession(project, sessionOptions) {
     created: new Date().toISOString(),
   };
 
-  // Track as pending (no .jsonl yet)
+  // Track as pending (no .jsonl yet). Keep the launch options so a failed launch
+  // can be retried with the same id + config (see openSession / retryPendingSession).
   const folder = encodeProjectPath(projectPath);
-  pendingSessions.set(sessionId, { session, projectPath, folder });
+  pendingSessions.set(sessionId, { session, projectPath, folder, options: sessionOptions || null });
 
   // Inject into cached project data so it appears in sidebar immediately
   sessionMap.set(sessionId, session);
@@ -770,6 +785,30 @@ async function launchNewSession(project, sessionOptions) {
   if (!result.ok) {
     entry.terminal.write(`\r\nError: ${result.error}\r\n`);
     entry.closed = true;
+    return;
+  }
+  if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
+
+  showSession(sessionId);
+  pollActiveSessions();
+}
+
+// Re-attempt a new-session launch that exited before writing a transcript.
+// Reuses the same session id + options, so this is a fresh --session-id start,
+// never a --resume (there is nothing on disk to resume).
+async function retryPendingSession(sessionId, pending) {
+  if (!pending) return;
+  const { session, projectPath, options } = pending;
+  session.launchFailed = false;
+  refreshSidebar();
+
+  const entry = createTerminalEntry(session);
+  const result = await window.api.openTerminal(sessionId, projectPath, true, options || null);
+  if (!result.ok) {
+    entry.terminal.write(`\r\nError: ${result.error}\r\n`);
+    entry.closed = true;
+    session.launchFailed = true;
+    refreshSidebar();
     return;
   }
   if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
@@ -819,6 +858,13 @@ async function openSession(session, customOptions) {
       destroySession(sessionId);
       if (session.type === 'terminal') {
         launchTerminalSession({ projectPath: session.projectPath });
+        return;
+      }
+      // A still-pending Claude session that exited never produced a transcript,
+      // so there is nothing to --resume. Re-run the original launch (same id +
+      // options) instead of attempting a resume that is guaranteed to fail.
+      if (pendingSessions.has(sessionId)) {
+        retryPendingSession(sessionId, pendingSessions.get(sessionId));
         return;
       }
     } else {

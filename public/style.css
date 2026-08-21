@@ -956,6 +956,20 @@ body { display: flex; flex-direction: column; }
   margin-left: auto;
 }
 
+/* Failed launch: a new session whose process exited before writing a transcript
+   (e.g. `--worktree` on a pre-existing branch). Reads as failed; click retries. */
+.session-launch-failed {
+  font-size: 10px;
+  color: #e0955a;
+  margin-top: 3px;
+}
+.session-item.launch-failed {
+  box-shadow: inset 2px 0 0 #e0955a;
+}
+.session-item.launch-failed .session-status-dot {
+  background: #e0955a;
+}
+
 /* ---- Session action buttons ---- */
 .session-actions {
   flex-shrink: 0;
