@@ -144,10 +144,10 @@ const TIER_LABELS = {
 };
 
 // A live session that isn't spinning has finished its turn, whether or not the
-// user has read it yet — both count as ready. Only a session the CLI reports as
-// busy (or one still starting up) is working. Busy state is only known from the
-// OSC 0 spinner, so a session idle since before this window opened reads as
-// ready, which is what it is.
+// user has read it yet — both count as ready. Only a session reported as busy (or
+// one still starting up) is working. Busy state comes from the OSC 0 spinner and
+// from the background-agent poller, so a session idle since before this window
+// opened reads as ready, which is what it is.
 function sessionTier(sessionId) {
   if (attentionSessions.has(sessionId)) return TIER_ATTENTION;
   if (responseReadySessions.has(sessionId)) return TIER_READY;
