@@ -403,10 +403,6 @@ function refreshSidebar({ resort = false } = {}) {
 archiveToggle.innerHTML = ICONS.archive(18);
 archiveToggle.addEventListener('click', () => {
   showArchived = !showArchived;
-  if (showArchived) {
-    showStarredOnly = false; starToggle.classList.remove('active');
-    showRunningOnly = false; runningToggle.classList.remove('active');
-  }
   archiveToggle.classList.toggle('active', showArchived);
   refreshSidebar({ resort: true });
 });
@@ -414,10 +410,7 @@ archiveToggle.addEventListener('click', () => {
 // --- Star filter toggle ---
 starToggle.addEventListener('click', () => {
   showStarredOnly = !showStarredOnly;
-  if (showStarredOnly) {
-    showRunningOnly = false; runningToggle.classList.remove('active');
-    showArchived = false; archiveToggle.classList.remove('active');
-  }
+  if (showStarredOnly) { showRunningOnly = false; runningToggle.classList.remove('active'); }
   starToggle.classList.toggle('active', showStarredOnly);
   refreshSidebar({ resort: true });
 });
@@ -425,10 +418,7 @@ starToggle.addEventListener('click', () => {
 // --- Running filter toggle ---
 runningToggle.addEventListener('click', () => {
   showRunningOnly = !showRunningOnly;
-  if (showRunningOnly) {
-    showStarredOnly = false; starToggle.classList.remove('active');
-    showArchived = false; archiveToggle.classList.remove('active');
-  }
+  if (showRunningOnly) { showStarredOnly = false; starToggle.classList.remove('active'); }
   runningToggle.classList.toggle('active', showRunningOnly);
   refreshSidebar({ resort: true });
 });

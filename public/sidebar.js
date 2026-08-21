@@ -164,10 +164,13 @@ function itemTier(item) {
 
 function renderSessionList(projects, resort) {
   const newSidebar = document.createElement('div');
-  const anyFilterActive = showStarredOnly || showRunningOnly || showTodayOnly || searchMatchIds !== null;
+  const anyFilterActive = showStarredOnly || showRunningOnly || showTodayOnly || showArchived || searchMatchIds !== null;
 
   function passesFilters(sessions) {
     let filtered = sessions;
+    // The archive filter is the only way archived sessions surface: when it's on
+    // we show exactly the archived ones, when it's off they're hidden entirely.
+    if (showArchived) filtered = filtered.filter(s => s.archived);
     if (showStarredOnly) filtered = filtered.filter(s => s.starred);
     if (showRunningOnly) filtered = filtered.filter(s => activePtyIds.has(s.sessionId));
     if (showTodayOnly) {
