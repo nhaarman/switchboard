@@ -463,9 +463,11 @@ function showProjectPickerDialog() {
 
   function render() {
     const query = filterInput.value.trim().toLowerCase();
-    // Fold worktree sub-projects into their parent so worktree activity bubbles
-    // the parent up the list and is counted, instead of vanishing behind a filter.
-    const projects = foldWorktreeProjects(cachedProjects)
+    // Sort on ALL sessions (cachedAllProjects), archived included: a project you
+    // worked in today and then archived should still rank by that recent activity.
+    // Fold worktree sub-projects into their parent too, so worktree activity
+    // bubbles the parent up the list and is counted rather than vanishing.
+    const projects = foldWorktreeProjects(cachedAllProjects)
       .filter(p => !query || folderTitle(p.projectPath).toLowerCase().includes(query) || p.projectPath.toLowerCase().includes(query))
       .sort((a, b) => mostRecent(b) - mostRecent(a));
 
