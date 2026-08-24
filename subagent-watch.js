@@ -18,6 +18,15 @@
 // stop as failed, killed (the user hit escape) and stopped, and treating those
 // as unfinished leaves sessions working forever.
 //
+// A notification is not the end of the id, though: a backgrounded agent can be
+// resumed and keeps the same id, so its transcript grows again and a second
+// notification lands later. A monotonic finished-set would strand it as done
+// forever after the first stop, leaving the session on "Ready" while it works.
+// So finishing is tracked per id as a running count, and an agent that has been
+// notified is live again once its transcript is touched after the write that
+// marked it finished — i.e. it resumed. Comparing the agent's mtime to the
+// mtime captured at that finish keeps this on one clock, with no wall-time skew.
+//
 // The one case the notification misses is a CLI that died without writing it —
 // a hard kill leaves an agent that looks live for days. Those are filtered by
 // process lifetime rather than by a timeout: an agent whose transcript hasn't
@@ -36,16 +45,18 @@ const AGENT_PREFIX = 'agent-';
 const NOTIFICATION_PATTERN = /<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/;
 
 /**
- * Tracks the finished-task ids of one parent transcript, reading only the bytes
- * that were appended since the last pass. Transcripts run to tens of megabytes
- * and every running session is polled, so re-reading them is not an option.
+ * Tracks how many terminal notifications each task id has drawn in one parent
+ * transcript, reading only the bytes appended since the last pass. Transcripts
+ * run to tens of megabytes and every running session is polled, so re-reading
+ * them is not an option. The count (not a bare seen/unseen flag) is what lets a
+ * resumed agent's second stop be told apart from its first.
  */
 class TranscriptTail {
   constructor(filePath) {
     this.filePath = filePath;
     this.offset = 0;
     this.partial = '';
-    this.finished = new Set();
+    this.finishCounts = new Map(); // task id → number of terminal notifications seen
   }
 
   read() {
@@ -53,15 +64,15 @@ class TranscriptTail {
     try {
       size = fs.statSync(this.filePath).size;
     } catch {
-      return this.finished;
+      return this.finishCounts;
     }
     // Truncated or replaced (a fork writes a fresh transcript): start over.
     if (size < this.offset) {
       this.offset = 0;
       this.partial = '';
-      this.finished.clear();
+      this.finishCounts.clear();
     }
-    if (size === this.offset) return this.finished;
+    if (size === this.offset) return this.finishCounts;
 
     let chunk = '';
     let fd;
@@ -72,7 +83,7 @@ class TranscriptTail {
       chunk = buf.slice(0, bytes).toString('utf8');
       this.offset += bytes;
     } catch {
-      return this.finished;
+      return this.finishCounts;
     } finally {
       if (fd !== undefined) try { fs.closeSync(fd); } catch {}
     }
@@ -83,9 +94,12 @@ class TranscriptTail {
       // Cheap reject first: this runs over every line of every transcript.
       if (!line.includes('<task-notification>')) continue;
       const match = NOTIFICATION_PATTERN.exec(line);
-      if (match) this.finished.add(match[1]);
+      if (match) {
+        const id = match[1];
+        this.finishCounts.set(id, (this.finishCounts.get(id) || 0) + 1);
+      }
     }
-    return this.finished;
+    return this.finishCounts;
   }
 }
 
@@ -101,6 +115,9 @@ class SessionAgents {
   constructor(sessionDir, transcript) {
     this.subagentsDir = path.join(sessionDir, 'subagents');
     this.tail = new TranscriptTail(transcript);
+    // task id → { count, mark }: the finish count last acted on and the agent's
+    // mtime captured then, so a later write can be recognised as a resume.
+    this.finishState = new Map();
   }
 
   /**
@@ -115,12 +132,11 @@ class SessionAgents {
       return { live: 0, agents: [] };
     }
 
-    const finished = this.tail.read();
+    const finishCounts = this.tail.read();
     const agents = [];
     for (const entry of entries) {
       if (!entry.startsWith(AGENT_PREFIX) || !entry.endsWith(META_SUFFIX)) continue;
       const id = entry.slice(AGENT_PREFIX.length, -META_SUFFIX.length);
-      if (finished.has(id)) continue;
 
       // The transcript is the agent's heartbeat; before its first write, the
       // meta file's own timestamp stands in.
@@ -133,6 +149,19 @@ class SessionAgents {
         try { touchedAt = fs.statSync(metaPath).mtimeMs; } catch { continue; }
       }
       if (touchedAt < ptyStartedAt) continue; // left behind by a CLI that is gone
+
+      // A fresh notification (the count moved, up on a stop or back to zero when
+      // a fork truncated the transcript) resets the mark to now: the agent is
+      // finished as of this mtime. With the count steady, a notified agent is
+      // live again only once it writes past that mark — i.e. it resumed.
+      const count = finishCounts.get(id) || 0;
+      const prev = this.finishState.get(id);
+      if (!prev || count !== prev.count) {
+        this.finishState.set(id, { count, mark: touchedAt });
+        if (count > 0) continue; // just stopped (or never ran): not live
+      } else if (count > 0 && touchedAt <= prev.mark) {
+        continue; // stopped and quiet since: still finished
+      }
 
       let description = '';
       try {

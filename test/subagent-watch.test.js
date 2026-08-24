@@ -45,6 +45,12 @@ function makeSession() {
     append(line) {
       fs.appendFileSync(transcript, line + '\n');
     },
+    /** A resumed agent writes to its transcript again; move its mtime forward. */
+    touch(id, at) {
+      const log = path.join(sessionDir, 'subagents', `agent-${id}.jsonl`);
+      fs.appendFileSync(log, '{"type":"assistant"}\n');
+      if (at) fs.utimesSync(log, at / 1000, at / 1000);
+    },
   };
 }
 
@@ -100,6 +106,29 @@ test('finishing is picked up on a later poll, reading only what was appended', (
 
   s.finish('two', 'failed');
   assert.strictEqual(watcher.poll().live, 0);
+});
+
+test('a backgrounded agent resumed after it stopped counts as live again', () => {
+  // The bug: a monotonic finished-set stranded an agent as done after its first
+  // notification, so a session sat on "Ready" while a resumed agent kept working.
+  const s = makeSession();
+  const t0 = Date.now() - 300_000;
+  s.spawn('resumed', 'Boot-path build', { touchedAt: t0 });
+  const watcher = s.watcher();
+  assert.strictEqual(watcher.poll().live, 1);
+
+  // First stop: a notification lands and the agent goes quiet.
+  s.finish('resumed');
+  assert.strictEqual(watcher.poll().live, 0, 'quiet after its first stop');
+
+  // The main loop resumes it (same id) and it writes to its transcript again.
+  s.touch('resumed', t0 + 120_000);
+  assert.strictEqual(watcher.poll().live, 1, 'live again once it writes past the stop');
+
+  // Second stop: a later notification for the same id ends it once more.
+  s.finish('resumed');
+  assert.strictEqual(watcher.poll().live, 0, 'quiet after its second stop');
+  assert.strictEqual(watcher.poll().live, 0, 'stays finished while quiet');
 });
 
 test('a transcript replaced by a shorter one is re-read from the start', () => {
