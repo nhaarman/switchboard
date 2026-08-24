@@ -12,7 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { SessionAgents } = require('../subagent-watch');
+const { SessionAgents, transcriptFolder } = require('../subagent-watch');
 
 const SESSION_ID = '04a1583a-bd8e-4112-b15a-005e5b940085';
 
@@ -143,6 +143,27 @@ test('a transcript replaced by a shorter one is re-read from the start', () => {
   // notification is gone and the agent is live again.
   fs.writeFileSync(path.join(s.dir, `${SESSION_ID}.jsonl`), '');
   assert.strictEqual(watcher.poll().live, 1);
+});
+
+test('the transcript folder is the one that holds the jsonl, not the first candidate', () => {
+  // A worktree session's stored projectFolder is the parent repo, but the CLI
+  // writes under the worktree folder. Picking the parent pointed the watcher at
+  // a dir that does not exist, so the session sat on "Ready" while it worked.
+  const parent = 'proj';
+  const worktree = 'proj--worktrees-x';
+  const sid = SESSION_ID;
+  const onDisk = new Set([`/root/${worktree}/${sid}.jsonl`]);
+  const exists = (p) => onDisk.has(p);
+
+  // Cache (worktree) is offered first and wins because it holds the transcript.
+  assert.strictEqual(transcriptFolder('/root', sid, [worktree, parent], exists), worktree);
+  // Even if the wrong parent is offered first, the real folder is still found.
+  assert.strictEqual(transcriptFolder('/root', sid, [parent, worktree], exists), worktree);
+  // Falsy and duplicate candidates are skipped.
+  assert.strictEqual(transcriptFolder('/root', sid, [null, parent, parent, worktree], exists), worktree);
+  // Nothing on disk yet (unindexed): null, so the caller retries next poll.
+  assert.strictEqual(transcriptFolder('/root', sid, [parent], exists), null);
+  assert.strictEqual(transcriptFolder('/root', sid, [], exists), null);
 });
 
 test('a session that never spawned an agent costs nothing', () => {

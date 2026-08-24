@@ -81,7 +81,7 @@ const {
   closeDb,
 } = require('./db');
 
-const { SessionAgents } = require('./subagent-watch');
+const { SessionAgents, transcriptFolder } = require('./subagent-watch');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const PLANS_DIR = path.join(os.homedir(), '.claude', 'plans');
@@ -1046,7 +1046,15 @@ const agentWatchers = new Map(); // sessionId → SessionAgents
 function agentWatcherFor(session, sessionId) {
   let watcher = agentWatchers.get(sessionId);
   if (!watcher) {
-    const folder = session.projectFolder || getCachedFolder(sessionId);
+    // The subagents dir sits next to the session's real transcript. For a
+    // worktree session the daemon's projectFolder is the parent repo, not the
+    // worktree the CLI actually writes under, so settle the folder by which
+    // candidate actually holds the transcript. Cache a watcher only once one
+    // resolves, so a not-yet-indexed session is retried on the next poll
+    // instead of stranded on a wrong folder.
+    const folder = transcriptFolder(
+      PROJECTS_DIR, sessionId, [getCachedFolder(sessionId), session.projectFolder],
+    );
     if (!folder) return null;
     watcher = new SessionAgents(
       path.join(PROJECTS_DIR, folder, sessionId),

@@ -174,4 +174,22 @@ class SessionAgents {
   }
 }
 
-module.exports = { SessionAgents, TranscriptTail };
+/**
+ * Of the candidate project folders, the one that actually owns this session's
+ * transcript on disk. A worktree session's stored projectFolder points at the
+ * parent repo rather than the worktree the CLI writes under, so the folder is
+ * settled by which candidate holds <sessionId>.jsonl — not by trusting one
+ * source. Returns null when none has it yet (an unindexed session), so the
+ * caller can retry rather than lock onto a wrong folder.
+ */
+function transcriptFolder(projectsDir, sessionId, candidates, existsSync = fs.existsSync) {
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    if (existsSync(path.join(projectsDir, candidate, `${sessionId}.jsonl`))) return candidate;
+  }
+  return null;
+}
+
+module.exports = { SessionAgents, TranscriptTail, transcriptFolder };
