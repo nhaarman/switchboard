@@ -463,8 +463,9 @@ function showProjectPickerDialog() {
 
   function render() {
     const query = filterInput.value.trim().toLowerCase();
-    const projects = [...cachedProjects]
-      .filter(p => !/\/\.claude\/worktrees\//.test(p.projectPath))
+    // Fold worktree sub-projects into their parent so worktree activity bubbles
+    // the parent up the list and is counted, instead of vanishing behind a filter.
+    const projects = foldWorktreeProjects(cachedProjects)
       .filter(p => !query || folderTitle(p.projectPath).toLowerCase().includes(query) || p.projectPath.toLowerCase().includes(query))
       .sort((a, b) => mostRecent(b) - mostRecent(a));
 
