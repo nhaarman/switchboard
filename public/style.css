@@ -487,11 +487,23 @@ body { display: flex; flex-direction: column; }
 .project-picker-name {
   flex: 1;
   min-width: 0;
+}
+
+.project-picker-title {
   font-size: 13px;
   color: #c8c8e0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.project-picker-location {
+  font-size: 11px;
+  color: #707088;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
 }
 
 .project-picker-count {

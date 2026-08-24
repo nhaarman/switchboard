@@ -12,6 +12,24 @@ function shortProjectPath(projectPath) {
   return projectPath.split(/[\\/]/).filter(Boolean).slice(-2).join('/');
 }
 
+/** The folder's own name — the last path segment (e.g. "WATERROWER-NOHRD"). */
+function folderTitle(projectPath) {
+  if (!projectPath) return '';
+  return projectPath.split(/[\\/]/).filter(Boolean).pop() || projectPath;
+}
+
+/**
+ * The folder's location — the parent directory, with the macOS home collapsed
+ * to "~" (e.g. "~/dev/waterrower"). Shown as the subtitle under the title.
+ */
+function folderLocation(projectPath) {
+  if (!projectPath) return '';
+  const segs = projectPath.split(/[\\/]/).filter(Boolean);
+  segs.pop();
+  if (segs.length === 0) return '/';
+  return ('/' + segs.join('/')).replace(/^\/Users\/[^/]+/, '~');
+}
+
 /**
  * Permission modes offered for a session, in the order they're shown.
  *

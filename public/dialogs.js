@@ -464,7 +464,8 @@ function showProjectPickerDialog() {
   function render() {
     const query = filterInput.value.trim().toLowerCase();
     const projects = [...cachedProjects]
-      .filter(p => !query || projectLabel(p.projectPath).toLowerCase().includes(query) || p.projectPath.toLowerCase().includes(query))
+      .filter(p => !/\/\.claude\/worktrees\//.test(p.projectPath))
+      .filter(p => !query || folderTitle(p.projectPath).toLowerCase().includes(query) || p.projectPath.toLowerCase().includes(query))
       .sort((a, b) => mostRecent(b) - mostRecent(a));
 
     listEl.innerHTML = '';
@@ -482,8 +483,17 @@ function showProjectPickerDialog() {
 
       const name = document.createElement('div');
       name.className = 'project-picker-name';
-      name.textContent = projectLabel(project.projectPath);
       name.title = project.projectPath;
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'project-picker-title';
+      titleEl.textContent = folderTitle(project.projectPath);
+
+      const locEl = document.createElement('div');
+      locEl.className = 'project-picker-location';
+      locEl.textContent = folderLocation(project.projectPath);
+
+      name.append(titleEl, locEl);
 
       const count = document.createElement('span');
       count.className = 'project-picker-count';
@@ -526,22 +536,6 @@ function showProjectPickerDialog() {
       };
 
       actions.append(scheduleBtn, settingsBtn, archiveBtn);
-
-      if (/\/\.claude\/worktrees\//.test(project.projectPath)) {
-        const hideBtn = document.createElement('button');
-        hideBtn.className = 'picker-hide-btn';
-        setTooltip(hideBtn, 'Hide worktree');
-        hideBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-        hideBtn.onclick = async (e) => {
-          e.stopPropagation();
-          const name = project.projectPath.split('/').pop();
-          if (!confirm(`Hide worktree "${name}"?\n\nSession files are not deleted.`)) return;
-          await window.api.removeProject(project.projectPath);
-          loadProjects();
-          render();
-        };
-        actions.appendChild(hideBtn);
-      }
 
       row.append(name, count, actions);
       row.onclick = () => {
