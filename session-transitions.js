@@ -5,7 +5,7 @@ const fs = require('fs');
  * Fork / plan-accept detection for active PTY sessions.
  * Call init(ctx) once with shared context.
  */
-let PROJECTS_DIR, activeSessions, getMainWindow, log, rekeyMcpServer, emitBusyState;
+let PROJECTS_DIR, activeSessions, getMainWindow, log, rekeyMcpServer, emitBusyState, archiveSession;
 
 function init(ctx) {
   PROJECTS_DIR = ctx.PROJECTS_DIR;
@@ -14,6 +14,7 @@ function init(ctx) {
   log = ctx.log;
   rekeyMcpServer = ctx.rekeyMcpServer;
   emitBusyState = ctx.emitBusyState;
+  archiveSession = ctx.archiveSession;
 }
 
 // --- Fork / plan-accept detection ---
@@ -34,10 +35,21 @@ function readNewSessionSignals(filePath) {
     let slug = null;
     let parentSessionId = null;
     let hasSnapshots = false;
+    let worktreeCreatorId = null;
+    // /clear starts a fresh session in the same PTY. The command turn lands a
+    // few entries in (after the local-command caveat), so scan the whole head
+    // rather than relying on the per-entry loop below, which stops at the first
+    // user/assistant message.
+    const isClear = head.includes('<command-name>/clear</command-name>');
     for (const line of lines) {
       const entry = JSON.parse(line);
       // Skip snapshot lines — they carry no fork/session signals
       if (entry.type === 'file-history-snapshot') { hasSnapshots = true; continue; }
+      // A worktree session records the id of the session that created the
+      // worktree; after a /clear it points back to the previous session.
+      if (entry.type === 'worktree-state' && entry.worktreeSession && entry.worktreeSession.sessionId) {
+        worktreeCreatorId = entry.worktreeSession.sessionId;
+      }
       if (entry.forkedFrom) forkedFrom = entry.forkedFrom.sessionId;
       if (entry.planContent) planContent = true;
       if (entry.slug && !slug) slug = entry.slug;
@@ -46,9 +58,9 @@ function readNewSessionSignals(filePath) {
       // Stop after finding a user or assistant message
       if (entry.type === 'user' || entry.type === 'assistant') break;
     }
-    return { forkedFrom, planContent, slug, parentSessionId, hasSnapshots };
+    return { forkedFrom, planContent, slug, parentSessionId, hasSnapshots, isClear, worktreeCreatorId };
   } catch {
-    return { forkedFrom: null, planContent: false, slug: null, parentSessionId: null, hasSnapshots: false };
+    return { forkedFrom: null, planContent: false, slug: null, parentSessionId: null, hasSnapshots: false, isClear: false, worktreeCreatorId: null };
   }
 }
 
@@ -84,6 +96,13 @@ function detectSessionTransitions(folder) {
   try {
     currentFiles = fs.readdirSync(folderPath).filter(f => f.endsWith('.jsonl'));
   } catch { return; }
+
+  // Live Claude PTYs in this folder. Used as the disambiguation anchor for a
+  // /clear outside a worktree, where the new file carries no back-reference.
+  let activeInFolder = 0;
+  for (const s of activeSessions.values()) {
+    if (!s.exited && !s.isPlainTerminal && s.projectFolder === folder) activeInFolder++;
+  }
 
   for (const [sessionId, session] of [...activeSessions]) {
     if (session.exited || session.isPlainTerminal || !session.knownJsonlFiles || session.projectFolder !== folder) {
@@ -154,6 +173,33 @@ function detectSessionTransitions(folder) {
         log.info(`[detect] session=${sessionId} NO MATCH for newFile=${newId} forkFrom=${session.forkFrom} parentSessionId=${signals.parentSessionId||'null'} forkedFrom=${signals.forkedFrom||'null'}`);
       }
 
+      // /clear: the same PTY started a brand-new session. There are no fork or
+      // plan signals, but a worktree session records the originating session id
+      // in its worktree-state, which points back to this active PTY (or to the
+      // session that first created the worktree — so repeated clears keep
+      // chaining via session.worktreeCreatorId). Outside a worktree there is no
+      // such anchor, so fall back to the sole live session in the folder.
+      let clearMatch = false;
+      if (!matched && signals.isClear && !session.forkFrom) {
+        const creator = signals.worktreeCreatorId;
+        if (creator) {
+          if (creator === sessionId || creator === session.worktreeCreatorId) {
+            matched = true;
+            clearMatch = true;
+          }
+        } else if (activeInFolder === 1) {
+          try {
+            const oldMtime = fs.statSync(path.join(folderPath, sessionId + '.jsonl')).mtimeMs;
+            const newMtime = fs.statSync(newFilePath).mtimeMs;
+            // New file appears right after the old one goes quiet.
+            if (newMtime >= oldMtime - 1000 && newMtime - oldMtime < 120000) {
+              matched = true;
+              clearMatch = true;
+            }
+          } catch {}
+        }
+      }
+
       // Plan-accept: shared slug + planContent + old session has ExitPlanMode
       if (!matched && signals.planContent && signals.slug) {
         const oldFilePath = path.join(folderPath, sessionId + '.jsonl');
@@ -171,15 +217,22 @@ function detectSessionTransitions(folder) {
       }
 
       if (matched) {
-        log.info(`[session-transition] ${sessionId} → ${newId} (${signals.forkedFrom || session.forkFrom ? 'fork' : 'plan-accept'})`);
+        const kind = clearMatch ? 'clear' : (signals.forkedFrom || session.forkFrom ? 'fork' : 'plan-accept');
+        log.info(`[session-transition] ${sessionId} → ${newId} (${kind})`);
         session.knownJsonlFiles = new Set(currentFiles);
         session.realSessionId = newId;
+        // Remember the worktree originator so a second /clear still chains.
+        if (clearMatch) session.worktreeCreatorId = signals.worktreeCreatorId || session.worktreeCreatorId || sessionId;
         // Update slug from new session
         if (signals.slug) session.sessionSlug = signals.slug;
         activeSessions.delete(sessionId);
         activeSessions.set(newId, session);
         // Re-key MCP server to match new session ID
         rekeyMcpServer(sessionId, newId);
+        // /clear supersedes the previous conversation: archive it so it drops
+        // out of the default list (still recoverable via the archive filter)
+        // instead of lingering as a second, live-looking row.
+        if (clearMatch && archiveSession) archiveSession(sessionId);
         const mainWindow = getMainWindow();
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('session-forked', sessionId, newId);

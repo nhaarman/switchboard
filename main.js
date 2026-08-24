@@ -1503,6 +1503,17 @@ sessionTransitions.init({
       }
     }).catch((err) => log.error(`[ptyd] rekey failed: ${err.message}`));
   },
+  // A /clear supersedes the previous conversation. Archive it so it drops out
+  // of the default session list; the renderer's session-forked handler reloads
+  // the list, and buildProjectsFromCache honours the archived flag.
+  archiveSession: (oldId) => {
+    try {
+      setArchived(oldId, 1);
+      log.info(`[session-transition] archived superseded session ${oldId} (/clear)`);
+    } catch (err) {
+      log.error(`[session-transition] archive failed for ${oldId}: ${err.message}`);
+    }
+  },
 });
 const { detectSessionTransitions } = sessionTransitions;
 
