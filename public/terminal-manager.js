@@ -9,7 +9,11 @@
 // Depends on: shellEscape (utils.js)
 
 // --- Terminal key bindings ---
-// Shift+Enter → kitty protocol (CSI 13;2u) so Claude Code treats it as newline, not submit.
+// Modified Enter → kitty protocol CSI-u sequences that Claude Code recognizes:
+//   Shift+Enter → CSI 13;2u — insert a newline instead of submitting.
+//   Ctrl+Enter  → CSI 13;5u — "send now" (flush a queued message mid-turn).
+// A terminal can't otherwise distinguish these from a plain Enter (all bare \r), so
+// xterm never emits them; we synthesize the kitty encoding. See enterKittySequence.
 // Two layers needed:
 //   1. attachCustomKeyEventHandler returning false — blocks xterm's key pipeline (onKey/onData)
 //   2. preventDefault on capture-phase keydown — prevents browser inserting \n into textarea
@@ -32,6 +36,19 @@ function shouldSendSpaceDirectly(e) {
   return e.key === ' '
     && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
     && !isImeComposing(e);
+}
+
+// Map a modified-Enter keydown to the kitty CSI-u sequence Claude Code expects, or
+// null when it isn't one we translate (plain Enter, or Enter with Alt/Cmd, falls
+// through to xterm). Platform-independent: Ctrl is the same physical key everywhere,
+// and Claude Code binds Ctrl+Enter to "send now" on every platform.
+//   Shift+Enter → CSI 13;2u : newline instead of submit.
+//   Ctrl+Enter  → CSI 13;5u : send now (modifier 5 = 1 + ctrl(4)).
+function enterKittySequence(e) {
+  if (e.key !== 'Enter' || e.altKey || e.metaKey) return null;
+  if (e.shiftKey && !e.ctrlKey) return '\x1b[13;2u';
+  if (e.ctrlKey && !e.shiftKey) return '\x1b[13;5u';
+  return null;
 }
 
 // Decode an OSC 52 payload into the text the program wants on the clipboard.
@@ -73,19 +90,11 @@ function setupTerminalKeyBindings(terminal, container, getSessionId, { onFind } 
       return false;
     }
 
-    // Shift+Enter → newline (kitty protocol CSI 13;2u) so Claude Code treats it as newline, not submit.
-    if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    // Shift+Enter → newline, Ctrl+Enter → "send now" (kitty CSI-u). See enterKittySequence.
+    const enterSeq = enterKittySequence(e);
+    if (enterSeq) {
       if (e.type === 'keydown') {
-        window.api.sendInput(getSessionId(), '\x1b[13;2u');
-      }
-      return false;
-    }
-
-    // Ctrl+Enter → newline on Windows/Linux (matches PowerShell convention).
-    // Send the same Shift+Enter kitty sequence that Claude Code recognizes as newline.
-    if (!isMac && e.key === 'Enter' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
-      if (e.type === 'keydown') {
-        window.api.sendInput(getSessionId(), '\x1b[13;2u');
+        window.api.sendInput(getSessionId(), enterSeq);
       }
       return false;
     }
@@ -132,7 +141,11 @@ function setupTerminalKeyBindings(terminal, container, getSessionId, { onFind } 
   const textarea = container.querySelector('.xterm-helper-textarea');
   if (textarea) {
     textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.shiftKey || (!isMac && e.ctrlKey)) && !e.altKey && !e.metaKey) {
+      // Suppress the browser's literal \n for ANY Ctrl/Shift-modified Enter — a superset
+      // of what enterKittySequence translates. This deliberately also covers
+      // Ctrl+Shift+Enter (which we don't translate): without it the browser would insert
+      // a stray \n into the hidden helper textarea for that combo.
+      if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey) && !e.altKey && !e.metaKey) {
         e.preventDefault();
       }
     }, { capture: true });
@@ -433,5 +446,5 @@ function setupDragAndDrop(container, getSessionId) {
 // Expose pure key-handling predicates to Node for unit testing. No-op in the
 // browser, where this file is loaded as a plain <script> and `module` is undefined.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { isImeComposing, shouldSendSpaceDirectly, decodeOsc52Payload };
+  module.exports = { isImeComposing, shouldSendSpaceDirectly, enterKittySequence, decodeOsc52Payload };
 }
