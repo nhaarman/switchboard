@@ -58,6 +58,11 @@ const log = {
 
 // mcp-bridge is loaded after `log` exists because it takes the same shape.
 const mcp = require('./mcp-bridge');
+const { binaryFingerprint, isBinaryReplaced } = require('./binary-fingerprint');
+
+// The build this daemon runs as. If the app is reinstalled while we keep
+// running, macOS still judges every session's permissions by this old build.
+const startupFingerprint = binaryFingerprint(process.execPath);
 
 // --- session registry ------------------------------------------------------
 // sessionId → { pty, state, buffer, bufferSize, exited, exitCode, purgeTimer }
@@ -169,7 +174,8 @@ async function handleControl(socket, msg) {
       case 'hello':
         clients.add(socket);
         mcp.setUi(daemonUi);
-        sendTo(socket, { t: 'hello-ok', version: PROTOCOL_VERSION, pid: process.pid, appVersion: args['app-version'] || null });
+        sendTo(socket, { t: 'hello-ok', version: PROTOCOL_VERSION, pid: process.pid, appVersion: args['app-version'] || null,
+          binaryReplaced: isBinaryReplaced(process.execPath, startupFingerprint) });
         return;
 
       case 'list':

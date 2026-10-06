@@ -139,6 +139,36 @@ function trackSession(sessionId, session) {
 }
 
 /**
+ * The daemon was started by a Switchboard build that has since been replaced.
+ * macOS ties permission grants to the code signature of the process that owns
+ * a shell, so every session under the old daemon keeps triggering prompts like
+ * "Switchboard would like to access data from other apps" — and allowing them
+ * never sticks. Swap in a fresh daemon: silently when it is idle, otherwise
+ * only if the user agrees to end the running sessions.
+ */
+async function replaceOutdatedDaemon(hello) {
+  const running = await ptyClient.list().catch(() => []);
+  if (running.length > 0) {
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Restart Sessions', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      message: 'Switchboard was updated, but your sessions still run under the previous version.',
+      detail: `macOS keeps asking for permissions (such as access to other apps' data) for these ${running.length} session(s) until they restart. Restarting ends them; Claude sessions can be resumed afterwards.`,
+    });
+    if (response !== 0) {
+      log.warn(`[ptyd] keeping outdated daemon (pid ${hello.pid}) with ${running.length} session(s)`);
+      return hello;
+    }
+  }
+  log.info(`[ptyd] replacing outdated daemon (pid ${hello.pid}, ${running.length} session(s))`);
+  const fresh = await ptyClient.restartDaemon();
+  log.info(`[ptyd] connected to fresh daemon (pid ${fresh.pid})`);
+  return fresh;
+}
+
+/**
  * Rebuild `activeSessions` from whatever the daemon is still running. Everything
  * the app needs to keep managing a session is stored in the daemon's per-session
  * `state` blob, because this process may be a completely new one.
@@ -1630,8 +1660,9 @@ if (!gotSingleInstanceLock) {
     // from a previous app run has to be adopted first, or the sidebar would show
     // it as stopped and a click would try to spawn a second process for it.
     try {
-      const hello = await ptyClient.connect();
+      let hello = await ptyClient.connect();
       log.info(`[ptyd] connected (pid ${hello.pid}, protocol v${hello.version})`);
+      if (hello.binaryReplaced) hello = await replaceOutdatedDaemon(hello);
       ptyClient.cleanStaleLocks();
       await adoptDaemonSessions();
     } catch (err) {

@@ -227,8 +227,24 @@ class PtyClient {
   }
   cleanStaleLocks() { this._request({ t: 'clean-stale-locks' }).catch(() => {}); }
 
-  /** Test helper: ask the daemon to exit. Never called from the app. */
+  /** Ask the daemon to exit. This ends every session it still runs. */
   shutdownDaemon() { return this._request({ t: 'shutdown' }).catch(() => {}); }
+
+  /**
+   * Replace the daemon with a fresh one spawned from our own binary. Used when
+   * the daemon outlived an app reinstall (see binary-fingerprint.js).
+   */
+  async restartDaemon() {
+    const oldPid = this.daemonPid;
+    await this.shutdownDaemon();
+    if (this.socket) this.socket.destroy();
+    for (let i = 0; i < CONNECT_ATTEMPTS && oldPid && isAlive(oldPid); i++) await delay(CONNECT_RETRY_MS);
+    return this.connect();
+  }
+}
+
+function isAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 function tryConnect(socketPath) {
