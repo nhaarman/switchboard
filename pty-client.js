@@ -88,6 +88,8 @@ class PtyClient {
     });
     socket.on('error', (err) => this.log.error(`[ptyd] socket error: ${err.message}`));
     socket.on('close', () => {
+      // After restartDaemon() a newer socket may already be attached; leave it be.
+      if (this.socket !== socket) return;
       this.socket = null;
       for (const [, p] of this.pending) p.reject(new Error('pty daemon connection closed'));
       this.pending.clear();
@@ -239,7 +241,10 @@ class PtyClient {
     await this.shutdownDaemon();
     if (this.socket) this.socket.destroy();
     for (let i = 0; i < CONNECT_ATTEMPTS && oldPid && isAlive(oldPid); i++) await delay(CONNECT_RETRY_MS);
-    return this.connect();
+    if (oldPid && isAlive(oldPid)) throw new Error(`old pty daemon (pid ${oldPid}) did not exit`);
+    const hello = await this.connect();
+    if (hello.pid === oldPid) throw new Error(`reconnected to the old pty daemon (pid ${oldPid})`);
+    return hello;
   }
 }
 

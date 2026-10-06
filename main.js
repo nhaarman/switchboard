@@ -163,9 +163,22 @@ async function replaceOutdatedDaemon(hello) {
     }
   }
   log.info(`[ptyd] replacing outdated daemon (pid ${hello.pid}, ${running.length} session(s))`);
-  const fresh = await ptyClient.restartDaemon();
-  log.info(`[ptyd] connected to fresh daemon (pid ${fresh.pid})`);
-  return fresh;
+  try {
+    const fresh = await ptyClient.restartDaemon();
+    log.info(`[ptyd] connected to fresh daemon (pid ${fresh.pid})`);
+    return fresh;
+  } catch (err) {
+    log.error(`[ptyd] daemon restart failed: ${err.message}`);
+  }
+  // Never leave the app without a daemon: reach whichever one is there now,
+  // spawning a new one if the old daemon is gone.
+  try {
+    return await ptyClient.connect();
+  } catch (err) {
+    dialog.showErrorBox('Switchboard could not start its session daemon',
+      `New sessions will not start until Switchboard is relaunched.\n\n${err.message}`);
+    throw err;
+  }
 }
 
 /**
