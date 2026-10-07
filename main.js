@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, screen, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, screen, shell } = require('electron');
 const { Worker } = require('worker_threads');
 const path = require('path');
 const fs = require('fs');
@@ -10,6 +10,7 @@ const log = require('electron-log');
 // survive quitting, reloading or updating the app — see pty-daemon.js.
 const { PtyClient, defaultSocketPath } = require('./pty-client');
 const { fetchAndTransformUsage } = require('./claude-auth');
+const { SCHEME, ensureLaunchToken, parseLaunchUrl } = require('./url-launch');
 
 // SWITCHBOARD_DATA_DIR isolates a dev/test instance from the installed app:
 // db.js puts switchboard.db under it, and pointing userData there gives the
@@ -100,6 +101,70 @@ const ptyClient = new PtyClient({
   daemonScript: path.join(__dirname, 'pty-daemon.js'),
   appVersion: app.getVersion(),
   log,
+});
+
+// --- switchboard:// launches (see url-launch.js) ---
+// macOS delivers the URL through open-url, also when it starts the app for it,
+// so open-url is registered before ready and launches are queued until the
+// renderer has subscribed (launch-session-ready).
+const LAUNCH_ROOTS = [path.join(os.homedir(), 'dev')];
+let launchRendererReady = false;
+let windowStartupDone = false;
+const queuedLaunches = [];
+
+function rejectLaunch(reason) {
+  log.warn(`[launch] rejected: ${reason}`);
+  const show = () => {
+    if (Notification.isSupported()) {
+      new Notification({ title: 'Switchboard weigerde een sessie', body: reason }).show();
+    }
+  };
+  if (app.isReady()) show(); else app.whenReady().then(show);
+}
+
+function handleLaunchUrl(rawUrl) {
+  let token;
+  try {
+    token = ensureLaunchToken(app.getPath('userData'));
+  } catch (err) {
+    rejectLaunch(`launch-token niet leesbaar: ${err.message}`);
+    return;
+  }
+  const result = parseLaunchUrl(rawUrl, { token, allowedRoots: LAUNCH_ROOTS });
+  if (!result.ok) {
+    rejectLaunch(result.reason);
+    return;
+  }
+  log.info(`[launch] new session in ${result.projectPath}`);
+  queuedLaunches.push({ projectPath: result.projectPath, prompt: result.prompt });
+  flushLaunches();
+}
+
+function flushLaunches() {
+  // On macOS the app keeps running with every window closed: reopen one, and its
+  // renderer drains the queue once it subscribes.
+  if (windowStartupDone && (!mainWindow || mainWindow.isDestroyed())) {
+    createWindow();
+    return;
+  }
+  if (!launchRendererReady || !mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  while (queuedLaunches.length) {
+    mainWindow.webContents.send('launch-session', queuedLaunches.shift());
+  }
+}
+
+app.on('open-url', (event, rawUrl) => {
+  event.preventDefault();
+  handleLaunchUrl(rawUrl);
+});
+
+ipcMain.on('launch-session-ready', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return;
+  launchRendererReady = true;
+  flushLaunches();
 });
 
 // MCP events originate in the daemon now; relay them to the renderer unchanged
@@ -263,6 +328,8 @@ function createWindow() {
     mainWindow.setBounds({ ...restorePosition, width: bounds.width, height: bounds.height });
   }
 
+  launchRendererReady = false;
+  mainWindow.webContents.on('did-start-loading', () => { launchRendererReady = false; });
   mainWindow.loadFile(path.join(__dirname, 'public', 'index.html'));
 
   // Open external links in the system browser instead of a child BrowserWindow
@@ -1442,6 +1509,11 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         }
       }
 
+      // The first prompt goes last, after "--", so no prompt text can be read as a flag
+      if (isNew && sessionOptions?.initialPrompt) {
+        claudeCmd += ' ' + quoteArgvForShell(shell, ['--', String(sessionOptions.initialPrompt)]);
+      }
+
       const ptyEnv = {
         ...cleanPtyEnv,
         TERM: 'xterm-256color', COLORTERM: 'truecolor',
@@ -1669,6 +1741,11 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(async () => {
     buildMenu();
 
+    // Dev runs (electron .) register the Electron binary; only the packaged app
+    // claims the scheme so a dev instance doesn't steal it from the installed one.
+    if (app.isPackaged) app.setAsDefaultProtocolClient(SCHEME);
+    try { ensureLaunchToken(app.getPath('userData')); } catch (err) { log.error(`[launch] token: ${err.message}`); }
+
     // Reach the pty daemon before showing a window: any session still running
     // from a previous app run has to be adopted first, or the sidebar would show
     // it as stopped and a click would try to spawn a second process for it.
@@ -1683,6 +1760,7 @@ if (!gotSingleInstanceLock) {
     }
 
     createWindow();
+    windowStartupDone = true;
     startProjectsWatcher();
     scheduleIpc.ensureScheduleCreatorCommand();
 

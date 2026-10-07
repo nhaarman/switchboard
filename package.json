@@ -65,6 +65,14 @@
       "node_modules/better-sqlite3/**",
       "node_modules/node-pty/**"
     ],
+    "protocols": [
+      {
+        "name": "Switchboard",
+        "schemes": [
+          "switchboard"
+        ]
+      }
+    ],
     "publish": {
       "provider": "github",
       "owner": "doctly",

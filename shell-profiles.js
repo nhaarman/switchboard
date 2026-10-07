@@ -164,9 +164,20 @@ function isWslShell(shellPath) {
 function quoteArgForShell(shellPath, value) {
   const s = value == null ? '' : String(value);
   const base = path.basename(shellPath).toLowerCase();
-  const isBashLike = base.includes('bash') || base.includes('zsh') || base === 'sh' || base === 'dash' || base === 'ksh' || base === 'fish' || base === 'nu' || isWslShell(shellPath);
+  const isBashLike = base.includes('bash') || base.includes('zsh') || base === 'sh' || base === 'dash' || base === 'ksh' || isWslShell(shellPath);
   const isPowerShell = base.includes('powershell') || base.includes('pwsh');
 
+  if (base === 'fish') {
+    // fish single quotes treat \\ and \' as escapes, so escape both instead of the POSIX '\''
+    return "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+  }
+  if (base === 'nu') {
+    // nushell single quotes have no escapes: use a raw string r#'…'# with one more #
+    // than the longest '### run in the value, so the value can't close it
+    const longest = Math.max(0, ...(s.match(/'#+/g) || []).map(run => run.length - 1));
+    const hashes = '#'.repeat(longest + 1);
+    return `r${hashes}'${s}'${hashes}`;
+  }
   if (isBashLike) {
     // POSIX: wrap in single quotes, escape embedded single quotes as '\''
     return "'" + s.replace(/'/g, "'\\''") + "'";
