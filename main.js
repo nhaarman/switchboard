@@ -107,7 +107,7 @@ const ptyClient = new PtyClient({
 // macOS delivers the URL through open-url, also when it starts the app for it,
 // so open-url is registered before ready and launches are queued until the
 // renderer has subscribed (launch-session-ready).
-const LAUNCH_ROOTS = [path.join(os.homedir(), 'dev')];
+const LAUNCH_ROOTS = [path.join(os.homedir(), 'dev'), path.join(os.homedir(), 'claude')];
 let launchRendererReady = false;
 let windowStartupDone = false;
 const queuedLaunches = [];

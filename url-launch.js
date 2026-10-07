@@ -7,7 +7,7 @@
 //      processes can read; compared in constant time, never rotated (delete the
 //      file for a new one);
 //   2. a folder whitelist: the session folder must exist and resolve (after
-//      symlinks) to a directory under one of the allowed roots (~/dev).
+//      symlinks) to a directory under one of the allowed roots (~/dev, ~/claude).
 // The URL can only set the folder and the first prompt: no flags, model or
 // permission mode. Unknown parameters are ignored.
 

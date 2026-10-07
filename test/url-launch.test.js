@@ -82,6 +82,21 @@ test('rejects a folder outside the allowed root, also via .. or a symlink', () =
   }
 });
 
+test('accepts a folder under any allowed root, including the root itself', () => {
+  const { root, dev, project } = setup();
+  const claude = path.join(root, 'claude');
+  fs.mkdirSync(claude);
+  const options = { token: 'secret', allowedRoots: [dev, claude] };
+  for (const p of [project, claude]) {
+    assert.deepEqual(parseLaunchUrl(launchUrl({ path: p, token: 'secret' }), options), { ok: true, projectPath: p, prompt: '' });
+  }
+  const outside = path.join(root, 'elsewhere');
+  fs.mkdirSync(outside);
+  const result = parseLaunchUrl(launchUrl({ path: outside, token: 'secret' }), options);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /map buiten/);
+});
+
 test('rejects a relative, missing or non-directory path', () => {
   const { project, options } = setup();
   const file = path.join(project, 'file.txt');
