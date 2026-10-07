@@ -44,6 +44,10 @@ contextBridge.exposeInMainWorld('api', {
   closeTerminal: (id) => ipcRenderer.send('close-terminal', id),
 
   // Listeners (main → renderer)
+  onLaunchSession: (callback) => {
+    ipcRenderer.on('launch-session', (_event, launch) => callback(launch));
+    ipcRenderer.send('launch-session-ready');
+  },
   onTerminalData: (callback) => {
     ipcRenderer.on('terminal-data', (_event, sessionId, data) => callback(sessionId, data));
   },

