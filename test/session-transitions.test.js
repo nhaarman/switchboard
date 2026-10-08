@@ -20,7 +20,7 @@ function setup(projectsDir) {
       webContents: { send: (channel, oldId, newId) => forked.push({ channel, oldId, newId }) },
     }),
     log: { info() {}, debug() {}, error() {} },
-    rekeyMcpServer: (oldId, newId) => rekeyed.push({ oldId, newId }),
+    rekeySession: (oldId, newId) => rekeyed.push({ oldId, newId }),
     archiveSession: (oldId) => archived.push(oldId),
   });
   return { activeSessions, forked, rekeyed, archived };

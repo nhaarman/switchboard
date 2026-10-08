@@ -90,26 +90,6 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('updater-event', (_event, type, data) => callback(type, data));
   },
 
-  // MCP bridge (main → renderer)
-  onMcpOpenDiff: (callback) => {
-    ipcRenderer.on('mcp-open-diff', (_event, sessionId, diffId, data) => callback(sessionId, diffId, data));
-  },
-  onMcpOpenFile: (callback) => {
-    ipcRenderer.on('mcp-open-file', (_event, sessionId, data) => callback(sessionId, data));
-  },
-  onMcpCloseAllDiffs: (callback) => {
-    ipcRenderer.on('mcp-close-all-diffs', (_event, sessionId) => callback(sessionId));
-  },
-  onMcpCloseTab: (callback) => {
-    ipcRenderer.on('mcp-close-tab', (_event, sessionId, diffId) => callback(sessionId, diffId));
-  },
-
-  // MCP bridge (renderer → main)
-  mcpDiffResponse: (sessionId, diffId, action, editedContent) => {
-    ipcRenderer.send('mcp-diff-response', sessionId, diffId, action, editedContent);
-  },
-  readFileForPanel: (filePath) => ipcRenderer.invoke('read-file-for-panel', filePath),
-  saveFileForPanel: (filePath, content) => ipcRenderer.invoke('save-file-for-panel', filePath, content),
   watchFile: (filePath) => ipcRenderer.invoke('watch-file', filePath),
   unwatchFile: (filePath) => ipcRenderer.invoke('unwatch-file', filePath),
   onFileChanged: (callback) => {

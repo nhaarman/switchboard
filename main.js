@@ -1,12 +1,13 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, screen, shell } = require('electron');
 const { Worker } = require('worker_threads');
 const path = require('path');
+const { fileURLToPath } = require('url');
 const fs = require('fs');
 const os = require('os');
 const pty = require('node-pty');
 const log = require('electron-log');
 // getFolderIndexMtimeMs moved to session-cache.js
-// PTY processes and the IDE MCP servers live in a separate daemon so sessions
+// PTY processes live in a separate daemon so sessions
 // survive quitting, reloading or updating the app — see pty-daemon.js.
 const { PtyClient, defaultSocketPath } = require('./pty-client');
 const { fetchAndTransformUsage } = require('./claude-auth');
@@ -167,19 +168,11 @@ ipcMain.on('launch-session-ready', (event) => {
   flushLaunches();
 });
 
-// MCP events originate in the daemon now; relay them to the renderer unchanged
-// so the file panel keeps receiving the same channels it always did.
-ptyClient.onMcpEvent((channel, payload) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(channel, ...payload);
-  }
-});
-
 /**
  * The slice of session bookkeeping that has to survive this process. The daemon
  * stores it opaquely and hands it back on the next launch (see adoptDaemonSessions).
  */
-function sessionState({ projectPath, projectFolder, knownJsonlFiles, sessionSlug, isPlainTerminal, sessionOptions, mcpPort }) {
+function sessionState({ projectPath, projectFolder, knownJsonlFiles, sessionSlug, isPlainTerminal, sessionOptions }) {
   return {
     projectPath,
     projectFolder,
@@ -187,7 +180,6 @@ function sessionState({ projectPath, projectFolder, knownJsonlFiles, sessionSlug
     sessionSlug: sessionSlug || null,
     isPlainTerminal: !!isPlainTerminal,
     forkFrom: sessionOptions?.forkFrom || null,
-    mcpPort: mcpPort || null,
     openedAt: Date.now(),
   };
 }
@@ -273,7 +265,6 @@ async function adoptDaemonSessions() {
       sessionSlug: state.sessionSlug || null,
       isPlainTerminal: !!state.isPlainTerminal,
       forkFrom: state.forkFrom || null,
-      mcpServer: state.mcpPort ? { port: state.mcpPort } : null,
       _openedAt: state.openedAt || Date.now(),
       _ptyStartedAt: startedAt || 0,
       _adopted: true,
@@ -550,6 +541,14 @@ ipcMain.handle('remove-project', (_event, projectPath) => {
 ipcMain.handle('open-external', (_event, url) => {
   log.info('[open-external IPC]', url);
   if (/^https?:\/\//i.test(url)) return shell.openExternal(url);
+  // File links (OSC 8 hyperlinks in Claude's output) open in the OS default app.
+  if (/^file:\/\//i.test(url)) {
+    let filePath;
+    try { filePath = fileURLToPath(url); } catch { return; }
+    return shell.openPath(filePath).then((error) => {
+      if (error) log.warn(`[open-external] could not open ${filePath}: ${error}`);
+    });
+  }
 });
 
 // --- IPC: clipboard write ---
@@ -558,31 +557,6 @@ ipcMain.handle('open-external', (_event, url) => {
 // strings attached, so all terminal copies go through here.
 ipcMain.handle('clipboard-write-text', (_event, text) => {
   if (typeof text === 'string') clipboard.writeText(text);
-});
-
-// --- IPC: MCP bridge ---
-ipcMain.on('mcp-diff-response', (_event, sessionId, diffId, action, editedContent) => {
-  ptyClient.diffResponse(sessionId, diffId, action, editedContent);
-});
-
-ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
-  try {
-    const content = fs.readFileSync(filePath, 'utf8');
-    return { ok: true, content };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('save-file-for-panel', async (_event, filePath, content) => {
-  try {
-    const resolved = path.resolve(filePath);
-    if (!fs.existsSync(resolved)) return { ok: false, error: 'File does not exist' };
-    fs.writeFileSync(resolved, content, 'utf8');
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
 });
 
 // ── File Watching (for viewer panels) ────────────────────────────────
@@ -1039,7 +1013,6 @@ const SETTING_DEFAULTS = {
   visibleSessionCount: 5,
   sidebarWidth: 340,
   terminalTheme: 'switchboard',
-  mcpEmulation: false,
   shellProfile: 'auto',
 };
 
@@ -1293,11 +1266,10 @@ function handleSessionData(session, sessionId, data, meta = {}) {
   }
 }
 
-// The daemon shuts the session's MCP server down as part of reaping the process,
-// so this only has to tell the renderer and forget our own bookkeeping.
+// The daemon reaps the process, so this only has to tell the renderer and
+// forget our own bookkeeping.
 function handleSessionExit(session, sessionId, exitCode) {
   session.exited = true;
-  session.mcpServer = null;
 
   const realId = session.realSessionId || sessionId;
   agentWatchers.delete(sessionId);
@@ -1348,7 +1320,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       mainWindow.webContents.send('terminal-data', sessionId, '\x1b[?25l');
     }
 
-    return { ok: true, reattached: true, mcpActive: !!session.mcpServer };
+    return { ok: true, reattached: true };
   }
 
   // Spawn new PTY
@@ -1416,7 +1388,6 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
   }
 
   let ptyProcess;
-  let mcpServer = null;
   try {
     if (isPlainTerminal) {
       // Plain terminal: interactive login shell, no claude command
@@ -1498,17 +1469,6 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         claudeCmd = pre + ' ' + claudeCmd;
       }
 
-      // Start MCP server for this session so Claude CLI sends diffs/file opens to Switchboard
-      // (skip if user disabled IDE emulation in global settings)
-      if (sessionOptions?.mcpEmulation !== false) {
-        try {
-          mcpServer = await ptyClient.startMcp(sessionId, [projectPath]);
-          claudeCmd += ' --ide';
-        } catch (err) {
-          log.error(`[mcp] Failed to start MCP server for ${sessionId}: ${err.message}`);
-        }
-      }
-
       // The first prompt goes last, after "--", so no prompt text can be read as a flag
       if (isNew && sessionOptions?.initialPrompt) {
         claudeCmd += ' ' + quoteArgvForShell(shell, ['--', String(sessionOptions.initialPrompt)]);
@@ -1519,9 +1479,6 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         TERM: 'xterm-256color', COLORTERM: 'truecolor',
         TERM_PROGRAM: 'iTerm.app', TERM_PROGRAM_VERSION: '3.6.6', FORCE_COLOR: '3', ITERM_SESSION_ID: '1',
       };
-      if (mcpServer) {
-        ptyEnv.CLAUDE_CODE_SSE_PORT = String(mcpServer.port);
-      }
 
       ptyProcess = await ptyClient.spawn({
         id: sessionId,
@@ -1534,7 +1491,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         // OSC 9 notifications (e.g. "needs your attention"). Without it, the packaged
         // app's minimal Electron environment won't trigger those sequences.
         env: ptyEnv,
-        state: sessionState({ projectPath, projectFolder, knownJsonlFiles, sessionSlug, isPlainTerminal, sessionOptions, mcpPort: mcpServer?.port }),
+        state: sessionState({ projectPath, projectFolder, knownJsonlFiles, sessionSlug, isPlainTerminal, sessionOptions }),
       });
 
     }
@@ -1548,14 +1505,14 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
     projectPath, firstResize: true,
     projectFolder, knownJsonlFiles, sessionSlug,
     isPlainTerminal, forkFrom: sessionOptions?.forkFrom || null,
-    mcpServer, _openedAt: Date.now(), _ptyStartedAt: Date.now(),
+    _openedAt: Date.now(), _ptyStartedAt: Date.now(),
   };
   trackSession(sessionId, session);
   if (sessionOptions?.forkFrom) {
     log.info(`[fork-spawn] tempId=${sessionId} forkFrom=${sessionOptions.forkFrom} folder=${projectFolder} knownFiles=${knownJsonlFiles.size}`);
   }
 
-  return { ok: true, reattached: false, mcpActive: !!mcpServer };
+  return { ok: true, reattached: false };
 });
 
 // --- IPC: terminal-input (fire-and-forget) ---
@@ -1610,9 +1567,9 @@ ipcMain.on('close-terminal', (_event, sessionId) => {
 const sessionTransitions = require('./session-transitions');
 sessionTransitions.init({
   PROJECTS_DIR, activeSessions, getMainWindow: () => mainWindow, log, emitBusyState,
-  // Re-keying has to reach the daemon as well: it keys sessions, their output
-  // frames and their MCP server by the same id.
-  rekeyMcpServer: (oldId, newId) => {
+  // Re-keying has to reach the daemon as well: it keys sessions and their output
+  // frames by the same id.
+  rekeySession: (oldId, newId) => {
     ptyClient.rekey(oldId, newId).then(() => {
       // Persist what the transition changed, so a later app run adopts the
       // session with an up-to-date view and can still spot the next transition.
@@ -1753,7 +1710,6 @@ if (!gotSingleInstanceLock) {
       let hello = await ptyClient.connect();
       log.info(`[ptyd] connected (pid ${hello.pid}, protocol v${hello.version})`);
       if (hello.binaryReplaced) hello = await replaceOutdatedDaemon(hello);
-      ptyClient.cleanStaleLocks();
       await adoptDaemonSessions();
     } catch (err) {
       log.error(`[ptyd] unavailable: ${err.message}`);
@@ -1826,7 +1782,7 @@ app.on('before-quit', () => {
     projectsWatcher = null;
   }
 
-  // PTY processes and their MCP servers stay up: they belong to the daemon, and
+  // PTY processes stay up: they belong to the daemon, and
   // surviving a quit is the point. Stopping a session is an explicit user action
   // (the stop button), never a side effect of closing the app.
   const live = [...activeSessions.values()].filter(s => !s.exited).length;

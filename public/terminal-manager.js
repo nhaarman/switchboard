@@ -242,13 +242,7 @@ function createTerminalEntry(session) {
     // in place. Windows/Linux get the same escape hatch via Shift, which needs no flag.
     macOptionClickForcesSelection: true,
     linkHandler: {
-      activate: (_event, uri) => {
-        if (uri.startsWith('file://') && typeof openFileInPanel === 'function') {
-          try { openFileInPanel(sessionId, decodeURIComponent(new URL(uri).pathname)); } catch {}
-        } else {
-          window.api.openExternal(uri);
-        }
-      },
+      activate: (_event, uri) => window.api.openExternal(uri),
       allowNonHttpProtocols: true,
     },
   });
@@ -273,13 +267,7 @@ function createTerminalEntry(session) {
 
   const fitAddon = new FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
-  terminal.loadAddon(new WebLinksAddon.WebLinksAddon((_event, url) => {
-    if (url.startsWith('file://') && typeof openFileInPanel === 'function') {
-      try { openFileInPanel(sessionId, decodeURIComponent(new URL(url).pathname)); } catch {}
-    } else {
-      window.api.openExternal(url);
-    }
-  }));
+  terminal.loadAddon(new WebLinksAddon.WebLinksAddon((_event, url) => window.api.openExternal(url)));
   const searchAddon = new SearchAddon.SearchAddon();
   terminal.loadAddon(searchAddon);
   terminal.loadAddon(new UnicodeGraphemesAddon.UnicodeGraphemesAddon());

@@ -36,7 +36,6 @@ class PtyClient {
     this.pending = new Map();      // rid → {resolve, reject}
     this.dataHandlers = new Map(); // sessionId → fn(data, { replay })
     this.exitHandlers = new Map(); // sessionId → fn(exitCode)
-    this.mcpEventHandler = null;
     this.daemonPid = null;
   }
 
@@ -133,10 +132,6 @@ class PtyClient {
       if (handler) handler(msg.exitCode);
       return;
     }
-    if (msg.t === 'mcp-event') {
-      if (this.mcpEventHandler) this.mcpEventHandler(msg.channel, msg.payload || []);
-      return;
-    }
   }
 
   _send(obj) {
@@ -213,21 +208,6 @@ class PtyClient {
     return this._request({ t: 'replay', id: sessionId });
   }
 
-  // --- MCP (hosted by the daemon so IDE servers survive too) ---------------
-
-  onMcpEvent(fn) { this.mcpEventHandler = fn; }
-
-  async startMcp(sessionId, workspaceFolders) {
-    const reply = await this._request({ t: 'mcp-start', id: sessionId, workspaceFolders });
-    return { port: reply.port, authToken: reply.authToken };
-  }
-
-  stopMcp(sessionId) { this._request({ t: 'mcp-stop', id: sessionId }).catch(() => {}); }
-  rekeyMcp(oldId, newId) { this._request({ t: 'mcp-rekey', oldId, newId }).catch(() => {}); }
-  diffResponse(sessionId, diffId, action, editedContent) {
-    this._request({ t: 'mcp-diff-response', id: sessionId, diffId, action, editedContent }).catch(() => {});
-  }
-  cleanStaleLocks() { this._request({ t: 'clean-stale-locks' }).catch(() => {}); }
 
   /** Ask the daemon to exit. This ends every session it still runs. */
   shutdownDaemon() { return this._request({ t: 'shutdown' }).catch(() => {}); }

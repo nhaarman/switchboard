@@ -72,7 +72,6 @@
     const visCountValue = fieldValue('visibleSessionCount', 25);
     const maxAgeValue = fieldValue('sessionMaxAgeDays', 3);
     const themeValue = fieldValue('terminalTheme', 'switchboard');
-    const mcpEmulationValue = fieldValue('mcpEmulation', true);
     const shellProfileValue = fieldValue('shellProfile', 'auto');
 
     // Discover available shell profiles
@@ -223,16 +222,6 @@
             <input type="number" class="settings-input settings-input-compact" id="sv-max-age" min="1" max="365" value="${maxAgeValue}">
           </div>
         </div>
-
-        <div class="settings-field">
-          <div class="settings-field-info">
-            <span class="settings-label">IDE Emulation</span>
-            <div class="settings-description">Emulate an IDE so Claude can open files and diffs in a side panel. Disable to use your own IDE instead. Changes take effect for new sessions only.</div>
-          </div>
-          <div class="settings-field-control">
-            <label class="settings-toggle"><input type="checkbox" id="sv-mcp-emulation" ${mcpEmulationValue ? 'checked' : ''}><span class="settings-toggle-slider"></span></label>
-          </div>
-        </div>
       </div>` : ''}
 
       ${!isProject ? `<div class="settings-section">
@@ -303,7 +292,6 @@
         settings.visibleSessionCount = parseInt(settingsViewerBody.querySelector('#sv-visible-count').value) || 25;
         settings.sessionMaxAgeDays = parseInt(settingsViewerBody.querySelector('#sv-max-age').value) || 3;
         settings.terminalTheme = settingsViewerBody.querySelector('#sv-terminal-theme').value || 'switchboard';
-        settings.mcpEmulation = settingsViewerBody.querySelector('#sv-mcp-emulation').checked;
         settings.shellProfile = settingsViewerBody.querySelector('#sv-shell-profile').value || 'auto';
       }
 
@@ -327,16 +315,6 @@
           window._applyTerminalTheme(settings.terminalTheme);
         }
         if (typeof refreshSidebar === 'function') refreshSidebar();
-      }
-
-      // Notify if IDE Emulation changed
-      if (!isProject && settings.mcpEmulation !== mcpEmulationValue) {
-        const notice = document.createElement('div');
-        notice.className = 'settings-notice';
-        notice.textContent = 'IDE Emulation setting changed. New sessions will use the updated setting \u2014 running sessions are not affected.';
-        const saveBtn = settingsViewerBody.querySelector('#sv-save-btn');
-        saveBtn.parentElement.insertBefore(notice, saveBtn);
-        setTimeout(() => notice.remove(), 8000);
       }
 
       const saveBtn = settingsViewerBody.querySelector('#sv-save-btn');

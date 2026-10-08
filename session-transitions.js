@@ -5,14 +5,14 @@ const fs = require('fs');
  * Fork / plan-accept detection for active PTY sessions.
  * Call init(ctx) once with shared context.
  */
-let PROJECTS_DIR, activeSessions, getMainWindow, log, rekeyMcpServer, emitBusyState, archiveSession;
+let PROJECTS_DIR, activeSessions, getMainWindow, log, rekeySession, emitBusyState, archiveSession;
 
 function init(ctx) {
   PROJECTS_DIR = ctx.PROJECTS_DIR;
   activeSessions = ctx.activeSessions;
   getMainWindow = ctx.getMainWindow;
   log = ctx.log;
-  rekeyMcpServer = ctx.rekeyMcpServer;
+  rekeySession = ctx.rekeySession;
   emitBusyState = ctx.emitBusyState;
   archiveSession = ctx.archiveSession;
 }
@@ -227,8 +227,8 @@ function detectSessionTransitions(folder) {
         if (signals.slug) session.sessionSlug = signals.slug;
         activeSessions.delete(sessionId);
         activeSessions.set(newId, session);
-        // Re-key MCP server to match new session ID
-        rekeyMcpServer(sessionId, newId);
+        // Re-key the daemon's session to match the new session ID
+        rekeySession(sessionId, newId);
         // /clear supersedes the previous conversation: archive it so it drops
         // out of the default list (still recoverable via the archive filter)
         // instead of lingering as a second, live-looking row.

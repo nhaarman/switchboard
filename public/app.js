@@ -58,8 +58,6 @@ function setActiveSession(id) {
   activeSessionId = id;
   if (id) sessionStorage.setItem('activeSessionId', id);
   else sessionStorage.removeItem('activeSessionId');
-  // Update file panel to show this session's open files/diffs
-  if (typeof switchPanel === 'function') switchPanel(id);
 }
 // Persist slug group expand state across reloads
 function getExpandedSlugs() {
@@ -258,9 +256,6 @@ window.api.onSessionForked((oldId, newId) => {
   // working across the fork — e.g. one waiting on a background agent — doesn't
   // get stranded showing "Ready" with its busy flag left under the old id.
   rekeySessionActivity(oldId, newId, { sessionBusyState, responseReadySessions, attentionSessions });
-
-  // Re-key file panel state for the new session ID
-  if (typeof rekeyFilePanelState === 'function') rekeyFilePanelState(oldId, newId);
 
   // Re-key pending session to newId so sidebar item persists until DB has real data
   const pendingEntry = pendingSessions.get(oldId);
@@ -809,7 +804,6 @@ async function launchNewSession(project, sessionOptions) {
     entry.closed = true;
     return;
   }
-  if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
 
   showSession(sessionId);
   pollActiveSessions();
@@ -833,7 +827,6 @@ async function retryPendingSession(sessionId, pending) {
     refreshSidebar();
     return;
   }
-  if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
 
   showSession(sessionId);
   pollActiveSessions();
@@ -906,7 +899,6 @@ async function openSession(session, customOptions) {
     entry.closed = true;
     return;
   }
-  if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
 
   showSession(sessionId);
   pollActiveSessions();
@@ -1305,6 +1297,3 @@ setInterval(refreshQuotaGauge, 5 * 60 * 1000);
 quotaGaugeEl.addEventListener('click', () => {
   document.querySelector('.sidebar-tab[data-tab="stats"]')?.click();
 });
-
-// --- Initialize file panel (MCP bridge UI) ---
-if (typeof initFilePanel === 'function') initFilePanel();

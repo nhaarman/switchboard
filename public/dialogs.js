@@ -19,7 +19,6 @@ async function resolveDefaultSessionOptions(project) {
   if (effective.chrome) options.chrome = true;
   if (effective.preLaunchCmd) options.preLaunchCmd = effective.preLaunchCmd;
   if (effective.addDirs) options.addDirs = effective.addDirs;
-  if (effective.mcpEmulation === false) options.mcpEmulation = false;
   return options;
 }
 
@@ -71,7 +70,6 @@ async function launchScheduleCreator(project) {
     entry.closed = true;
     return;
   }
-  if (typeof setSessionMcpActive === 'function') setSessionMcpActive(result.sessionId, !!openResult.mcpActive);
   showSession(result.sessionId);
   pollActiveSessions();
 }
@@ -281,7 +279,6 @@ async function showNewSessionDialog(project) {
     const preLaunch = dialog.querySelector('#nsd-pre-launch').value.trim();
     if (preLaunch) options.preLaunchCmd = preLaunch;
     options.addDirs = dialog.querySelector('#nsd-add-dirs').value.trim();
-    if (effective.mcpEmulation === false) options.mcpEmulation = false;
     close();
     launchNewSession(project, options);
   }
@@ -398,7 +395,6 @@ async function showResumeSessionDialog(session) {
     const preLaunch = dialog.querySelector('#rsd-pre-launch').value.trim();
     if (preLaunch) options.preLaunchCmd = preLaunch;
     options.addDirs = dialog.querySelector('#rsd-add-dirs').value.trim();
-    if (effective.mcpEmulation === false) options.mcpEmulation = false;
     close();
     openSession(session, options);
   }

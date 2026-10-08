@@ -46,7 +46,6 @@ async function connectClient() {
     output: new Map(),   // sessionId → live output
     replayed: new Map(), // sessionId → replayed scrollback
     exits: [],
-    events: [],
     nextRid: 1,
     pending: new Map(),
   };
@@ -67,8 +66,6 @@ async function connectClient() {
       if (client._helloResolve) client._helloResolve(msg);
     } else if (msg.t === 'exit') {
       client.exits.push(msg);
-    } else if (msg.t === 'mcp-event') {
-      client.events.push(msg);
     }
   });
   socket.on('data', (chunk) => read(chunk));

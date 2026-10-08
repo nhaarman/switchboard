@@ -5,9 +5,8 @@
 // Before this existed, node-pty children were owned by the Electron main process
 // and `before-quit` killed them all: quitting Switchboard (or installing an
 // update) interrupted whatever Claude was doing mid-turn and threw away the
-// scrollback. The daemon holds the pty processes, the per-session output ring
-// buffer, and the IDE MCP servers, so the app is just a client that attaches and
-// detaches.
+// scrollback. The daemon holds the pty processes and the per-session output ring
+// buffer, so the app is just a client that attaches and detaches.
 //
 // It is deliberately dumb: it knows nothing about shells, worktrees, settings or
 // OSC parsing. The client hands it a fully resolved spawn spec and stores any
@@ -56,8 +55,6 @@ const log = {
   debug: () => {},
 };
 
-// mcp-bridge is loaded after `log` exists because it takes the same shape.
-const mcp = require('./mcp-bridge');
 const { binaryFingerprint, isBinaryReplaced } = require('./binary-fingerprint');
 
 // The build this daemon runs as. If the app is reinstalled while we keep
@@ -132,7 +129,6 @@ function spawnSession(msg) {
     const sid = currentIdOf(session) || id;
     session.exited = true;
     session.exitCode = exitCode;
-    mcp.shutdownMcpServer(sid);
     broadcast(encodeControl({ t: 'exit', id: sid, exitCode }));
     log.info(`session ${sid} exited code=${exitCode}`);
     session.purgeTimer = setTimeout(() => {
@@ -173,7 +169,6 @@ async function handleControl(socket, msg) {
     switch (msg.t) {
       case 'hello':
         clients.add(socket);
-        mcp.setUi(daemonUi);
         sendTo(socket, { t: 'hello-ok', version: PROTOCOL_VERSION, pid: process.pid, appVersion: args['app-version'] || null,
           binaryReplaced: isBinaryReplaced(process.execPath, startupFingerprint) });
         return;
@@ -212,7 +207,6 @@ async function handleControl(socket, msg) {
         const s = requireSession(msg.oldId);
         sessions.delete(msg.oldId);
         sessions.set(msg.newId, s);
-        mcp.rekeyMcpServer(msg.oldId, msg.newId);
         log.info(`session ${msg.oldId} re-keyed to ${msg.newId}`);
         return reply({ ok: true });
       }
@@ -224,27 +218,6 @@ async function handleControl(socket, msg) {
         }
         return reply({ ok: true, exited: s.exited, exitCode: s.exitCode });
       }
-
-      case 'mcp-start': {
-        const result = await mcp.startMcpServer(msg.id, msg.workspaceFolders, daemonUi, log);
-        return reply({ ok: true, ...result });
-      }
-
-      case 'mcp-rekey':
-        mcp.rekeyMcpServer(msg.oldId, msg.newId);
-        return reply({ ok: true });
-
-      case 'mcp-stop':
-        mcp.shutdownMcpServer(msg.id);
-        return reply({ ok: true });
-
-      case 'mcp-diff-response':
-        mcp.resolvePendingDiff(msg.id, msg.diffId, msg.action, msg.editedContent);
-        return reply({ ok: true });
-
-      case 'clean-stale-locks':
-        mcp.cleanStaleLockFiles(log);
-        return reply({ ok: true });
 
       case 'shutdown':
         reply({ ok: true });
@@ -260,14 +233,6 @@ async function handleControl(socket, msg) {
     return reply({ error: err.message });
   }
 }
-
-// The MCP bridge talks to "the UI" — here that is whichever clients are attached.
-// With none attached the bridge answers on its own so an unattended session is
-// never left blocking on a diff nobody can see.
-const daemonUi = {
-  isAlive: () => clients.size > 0,
-  send: (channel, ...payload) => broadcast(encodeControl({ t: 'mcp-event', channel, payload })),
-};
 
 // --- server ----------------------------------------------------------------
 function startServer() {
@@ -299,8 +264,6 @@ function startServer() {
     socket.on('close', () => {
       clients.delete(socket);
       if (clients.size === 0) {
-        // Nobody can answer a diff prompt any more; release anything waiting.
-        mcp.releasePendingForUiGone();
         idleSince = Date.now();
         log.info('last client detached; sessions keep running');
       }
