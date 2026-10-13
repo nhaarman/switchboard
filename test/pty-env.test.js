@@ -33,3 +33,16 @@ test('an empty locale value counts as absent', () => {
   // an empty string gives pbcopy nothing to work with either.
   assert.equal(buildPtyEnv({ LANG: '' }).LC_CTYPE, 'UTF-8');
 });
+
+test('sessions are never started as children of the shell that started Switchboard', () => {
+  const env = buildPtyEnv({ PATH: '/usr/bin', CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_USE_BEDROCK: '1',
+    CLAUDE_CODE_SESSION_ID: 'parent', CLAUDE_PID: '42', CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/s', CLAUDE_CODE_PLUGIN_DIRS: '~/mods' });
+  assert.equal(env.CLAUDE_CODE_SESSION_ID, undefined, 'the parent session id would tie the new session to it');
+  assert.equal(env.CLAUDE_PID, undefined);
+  assert.equal(env.CLAUDE_CODE_MESSAGING_SOCKET, undefined);
+  assert.equal(env.CLAUDE_CODE_PLUGIN_DIRS, '~/mods');
+  assert.equal(env.CLAUDECODE, undefined);
+  assert.equal(env.CLAUDE_CODE_CHILD_SESSION, undefined);
+  assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
+  assert.equal(env.CLAUDE_CODE_USE_BEDROCK, '1', 'settings the user exported stay');
+});
