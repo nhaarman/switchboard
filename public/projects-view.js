@@ -2963,13 +2963,15 @@ function closeContextMenu() {
 }
 
 function onCtxPointerDown(e) {
-  if (!openCtxMenu) return;
+  if (!openCtxMenu) { document.removeEventListener('pointerdown', onCtxPointerDown, true); return; }
   // Submenus hang off document.body, not the root menu, so they count as inside too.
   const inside = openCtxMenu.contains(e.target) || openCtxMenu._subs.some(s => s.contains(e.target));
   if (!inside) closeContextMenu();
 }
 
 function onCtxKey(e) {
+  // No menu open: a leftover listener, which must not eat the key.
+  if (!openCtxMenu) { document.removeEventListener('keydown', onCtxKey, true); return; }
   if (e.key === 'Escape') { e.stopPropagation(); closeContextMenu(); }
 }
 
@@ -3045,6 +3047,9 @@ function showContextMenu(items, position) {
   openCtxMenu = menu;
   placeMenu(menu, position || { x: 20, y: 20 });
   setTimeout(() => {
+    // Closed again before this tick (a quick click): adding the listeners now
+    // would leave them behind for good, swallowing every later Escape.
+    if (openCtxMenu !== menu) return;
     document.addEventListener('pointerdown', onCtxPointerDown, true);
     document.addEventListener('keydown', onCtxKey, true);
   }, 0);
