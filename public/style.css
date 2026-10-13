@@ -166,7 +166,9 @@ body { display: flex; flex-direction: column; }
   background: #18181f;
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  /* Stretch to the app container, which stops above the status bar; 100vh
+     overflowed it by the bar's height and let it scroll under the title bar. */
+  min-height: 0;
   border-right: none;
   flex-shrink: 0;
 }
@@ -175,7 +177,6 @@ body { display: flex; flex-direction: column; }
   width: 4px;
   cursor: col-resize;
   background: transparent;
-  height: 100vh;
   flex-shrink: 0;
   position: relative;
   z-index: 10;
