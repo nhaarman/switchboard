@@ -45,8 +45,12 @@ const { encodeProjectPath } = require('./encode-project-path');
 
 
 // --- Auto-updater (only in packaged builds) ---
+// A build made from a local checkout carries `localBuild` in its package.json
+// (electron-builder -c.extraMetadata.localBuild=true). It must never update
+// itself: a release from upstream would replace it, and its changes with it.
+const LOCAL_BUILD = (() => { try { return !!require('./package.json').localBuild; } catch { return false; } })();
 let autoUpdater = null;
-if (app.isPackaged || process.env.FORCE_UPDATER) {
+if ((app.isPackaged || process.env.FORCE_UPDATER) && !LOCAL_BUILD) {
   autoUpdater = require('electron-updater').autoUpdater;
   autoUpdater.logger = log;
   autoUpdater.autoDownload = true;
