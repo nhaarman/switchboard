@@ -1598,12 +1598,12 @@ function handleSessionData(session, sessionId, data, meta = {}) {
   if (data.includes('\x1b[?')) {
     if (data.includes('\x1b[?1049h') || data.includes('\x1b[?47h')) {
       session.altScreen = true;
-      ptyClient.setState(currentId, { altScreen: true });
+      ptyClient.setState(session.pty?.sessionId || currentId, { altScreen: true });
       log.info(`[altscreen] session=${currentId} ON`);
     }
     if (data.includes('\x1b[?1049l') || data.includes('\x1b[?47l')) {
       session.altScreen = false;
-      ptyClient.setState(currentId, { altScreen: false });
+      ptyClient.setState(session.pty?.sessionId || currentId, { altScreen: false });
       log.info(`[altscreen] session=${currentId} OFF`);
     }
   }
@@ -1670,7 +1670,8 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
     // Replay the daemon's scrollback. It arrives as replay-tagged frames, which
     // handleSessionData forwards to the renderer without re-parsing.
     try {
-      await ptyClient.replay(sessionId);
+      // The daemon knows a Codex session by its launch id, not its detected one.
+      await ptyClient.replay(session.pty?.sessionId || sessionId);
     } catch (err) {
       log.error(`[ptyd] replay failed for ${sessionId}: ${err.message}`);
     }
@@ -2055,7 +2056,13 @@ sessionTransitions.init({
   // Re-keying has to reach the daemon as well: it keys sessions and their output
   // frames by the same id.
   rekeySession: (oldId, newId) => {
-    ptyClient.rekey(oldId, newId).then(() => {
+    const rekeyed = ptyClient.rekey(oldId, newId);
+    // The pty handle tags input, resize and kill with its id; the daemon only
+    // knows the new one now. The rekey request is already on the socket, so
+    // input sent under the new id reaches the daemon after it.
+    const moved = activeSessions.get(newId);
+    if (moved?.pty) moved.pty = ptyClient.handle(newId);
+    rekeyed.then(() => {
       // Persist what the transition changed, so a later app run adopts the
       // session with an up-to-date view and can still spot the next transition.
       const session = activeSessions.get(newId);

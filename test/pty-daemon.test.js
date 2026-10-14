@@ -216,3 +216,27 @@ test('state survives as an opaque blob the client can update', async () => {
 
   await client.request({ t: 'kill', id });
 });
+
+test('input sent right after a re-key reaches the session under its new id', async () => {
+  // The app swaps its pty handle to the new id without waiting for the rekey
+  // reply; this relies on the rekey request reaching the daemon first.
+  const { PtyClient } = require('../pty-client');
+  const ptyClient = new PtyClient({ socketPath, dataDir, log: { info() {}, warn() {}, error() {} } });
+  await ptyClient.connect();
+  const oldId = 'aaaaaaaa-0000-4000-8000-000000000009';
+  const newId = 'bbbbbbbb-0000-4000-8000-000000000009';
+  let output = '';
+  ptyClient.onData(oldId, (data) => { output += data; });
+  await ptyClient.spawn({
+    id: oldId, file: '/bin/sh', args: [], cwd: dataDir, cols: 80, rows: 24,
+    env: { ...process.env, PS1: '$ ' }, state: {},
+  });
+
+  const rekeyed = ptyClient.rekey(oldId, newId);
+  ptyClient.handle(newId).write('echo AFTER_REKEY\n');
+  await rekeyed;
+  await waitFor(() => output.includes('\nAFTER_REKEY'), 5000, 'echo under the new id');
+
+  ptyClient.handle(newId).kill();
+  ptyClient.socket.destroy();
+});
