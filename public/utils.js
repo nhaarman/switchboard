@@ -12,6 +12,9 @@ function shortProjectPath(projectPath) {
   return projectPath.split(/[\\/]/).filter(Boolean).slice(-2).join('/');
 }
 
+// Session dialogs, schedules and global settings share the same CLI choices.
+const { PERMISSION_MODES, CODEX_SANDBOX_MODES, CODEX_APPROVAL_POLICIES } = SessionConfig;
+
 /** The folder's own name — the last path segment (e.g. "WATERROWER-NOHRD"). */
 function folderTitle(projectPath) {
   if (!projectPath) return '';
@@ -30,26 +33,6 @@ function folderLocation(projectPath) {
   return ('/' + segs.join('/')).replace(/^\/Users\/[^/]+/, '~');
 }
 
-/**
- * Permission modes offered for a session, in the order they're shown.
- *
- * `value` is passed verbatim to `claude --permission-mode`, so each one must
- * stay a member of that flag's choice list (as of CLI 2.1.220: acceptEdits,
- * auto, bypassPermissions, manual, dontAsk, plan). A `null` value means we omit
- * the flag entirely and let the CLI apply the user's own configured default.
- *
- * Shared by both session dialogs and the settings panel — the list used to be
- * copy-pasted in all three, so a new mode reached only whichever copy someone
- * remembered to edit.
- */
-const PERMISSION_MODES = [
-  { value: null, label: 'Default', desc: 'Prompt for all actions' },
-  { value: 'auto', label: 'Auto', desc: 'Classifier allows routine work, stops for risky actions' },
-  { value: 'acceptEdits', label: 'Accept Edits', desc: 'Auto-accept file edits, prompt for others' },
-  { value: 'plan', label: 'Plan Mode', desc: 'Read-only exploration, no writes' },
-  { value: 'dontAsk', label: "Don't Ask", desc: 'Auto-deny tools not explicitly allowed' },
-  { value: 'bypassPermissions', label: 'Bypass', desc: 'Auto-accept all tool calls' },
-];
 
 // Mirror Claude CLI's project-folder naming. Must stay in sync with
 // encode-project-path.js (main process). Reverse-engineered from claude CLI 2.1.126.

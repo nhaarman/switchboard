@@ -18,6 +18,16 @@
 
 const WORKTREE_PATTERN = /^(.+?)\/\.claude\/worktrees\/([^/]+)\/?$/;
 
+// A session counts as running while its PTY is alive, or while it's pending —
+// a just-launched session has no PTY in activePtyIds until the next poll. A
+// pending session whose process died is marked exited and no longer counts.
+// Also used by the Projects tab (projects-view.js).
+function isSessionRunning(sessionId) {
+  if (activePtyIds.has(sessionId)) return true;
+  const pending = pendingSessions.get(sessionId);
+  return !!pending && !pending.exited;
+}
+
 function slugId(slug, projectPath) {
   return 'slug-' + (projectPath + '--' + slug).replace(/[^a-zA-Z0-9_-]/g, '_');
 }
@@ -289,12 +299,28 @@ function renderSessionList(projects, resort) {
     const moreBtn = document.createElement('div');
     moreBtn.className = 'sessions-more-toggle';
     moreBtn.id = 'older-all';
-    moreBtn.textContent = `+ ${older.length} older`;
+
+    const moreLabel = document.createElement('span');
+    moreLabel.className = 'sessions-more-label';
+
+    const archiveOlderBtn = document.createElement('button');
+    archiveOlderBtn.className = 'sessions-older-archive-btn';
+    archiveOlderBtn.title = 'Archive all older sessions';
+    archiveOlderBtn.setAttribute('aria-label', 'Archive all older sessions');
+    archiveOlderBtn.innerHTML = ICONS.archive(14);
+
+    moreBtn.appendChild(moreLabel);
+    moreBtn.appendChild(archiveOlderBtn);
     const olderList = document.createElement('div');
     olderList.className = 'sessions-older';
     olderList.id = 'older-list-all';
     olderList.style.display = 'none';
     for (const item of older) olderList.appendChild(item.element);
+    // An older render item can be a slug group containing several sessions.
+    // Count the actual unarchived session rows so this label matches the
+    // archive confirmation and the work the archive button will perform.
+    const olderSessionCount = olderList.querySelectorAll('.session-item:not(.archived-item)').length;
+    moreLabel.textContent = `+ ${olderSessionCount} older`;
     list.appendChild(moreBtn);
     list.appendChild(olderList);
   }
@@ -326,7 +352,8 @@ function renderSessionList(projects, resort) {
       }
       if (fromEl.classList.contains('sessions-more-toggle') && fromEl.classList.contains('expanded')) {
         toEl.classList.add('expanded');
-        toEl.textContent = '- hide older';
+        const label = toEl.querySelector('.sessions-more-label');
+        if (label) label.textContent = '- hide older';
       }
       if (fromEl.classList.contains('slug-group-older') && fromEl.style.display !== 'none') {
         toEl.style.display = '';
@@ -370,6 +397,7 @@ function rebindSidebarEvents() {
           if (!session || session.archived) continue;
           if (activePtyIds.has(sid)) await window.api.stopSession(sid);
           await window.api.archiveSession(sid, 1);
+          forgetTerminalHistory(sid);
           session.archived = 1;
         }
         pollActiveSessions();
@@ -396,13 +424,37 @@ function rebindSidebarEvents() {
   sidebarContent.querySelectorAll('.sessions-more-toggle').forEach(moreBtn => {
     const olderList = moreBtn.nextElementSibling;
     if (!olderList || !olderList.classList.contains('sessions-older')) return;
-    const count = olderList.children.length;
-    moreBtn.onclick = () => {
+    const count = olderList.querySelectorAll('.session-item:not(.archived-item)').length;
+    const moreLabel = moreBtn.querySelector('.sessions-more-label');
+    moreBtn.onclick = (e) => {
+      if (e.target.closest('.sessions-older-archive-btn')) return;
       const showing = olderList.style.display !== 'none';
       olderList.style.display = showing ? 'none' : '';
       moreBtn.classList.toggle('expanded', !showing);
-      moreBtn.textContent = showing ? `+ ${count} older` : '- hide older';
+      if (moreLabel) moreLabel.textContent = showing ? `+ ${count} older` : '- hide older';
     };
+
+    const archiveOlderBtn = moreBtn.querySelector('.sessions-older-archive-btn');
+    if (archiveOlderBtn) {
+      archiveOlderBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const sessions = [...olderList.querySelectorAll('.session-item')]
+          .map(item => sessionMap.get(item.dataset.sessionId))
+          .filter(session => session && !session.archived);
+        if (sessions.length === 0) return;
+        if (!confirm(`Archive all ${sessions.length} older session${sessions.length > 1 ? 's' : ''}?`)) return;
+        for (const session of sessions) {
+          if (activePtyIds.has(session.sessionId)) {
+            await window.api.stopSession(session.sessionId);
+          }
+          await window.api.archiveSession(session.sessionId, 1);
+          forgetTerminalHistory(session.sessionId);
+          session.archived = 1;
+        }
+        pollActiveSessions();
+        loadProjects();
+      };
+    }
   });
 
   sidebarContent.querySelectorAll('.session-item').forEach(item => {
@@ -431,7 +483,10 @@ function rebindSidebarEvents() {
     if (stopBtn) {
       stopBtn.onclick = (e) => {
         e.stopPropagation();
-        confirmAndStopSession(session.sessionId);
+        // Nothing to stop on a session that never started: the same control
+        // clears the row instead, which is otherwise unremovable.
+        if (isDismissibleSession(session.sessionId)) dismissSession(session.sessionId);
+        else confirmAndStopSession(session.sessionId);
       };
     }
 
@@ -445,14 +500,6 @@ function rebindSidebarEvents() {
           markUnread(session.sessionId);
         }
         refreshSidebar();
-      };
-    }
-
-    const launchConfigBtn = item.querySelector('.session-launch-config-btn');
-    if (launchConfigBtn) {
-      launchConfigBtn.onclick = (e) => {
-        e.stopPropagation();
-        showResumeSessionDialog(session);
       };
     }
 
@@ -470,11 +517,27 @@ function rebindSidebarEvents() {
       };
     }
 
-    const jsonlBtn = item.querySelector('.session-jsonl-btn');
-    if (jsonlBtn) {
-      jsonlBtn.onclick = (e) => {
+    const moreBtn = item.querySelector('.session-more-btn');
+    if (moreBtn) {
+      moreBtn.onclick = (e) => {
         e.stopPropagation();
-        showJsonlViewer(session);
+        const menuItems = [
+          { label: 'Rename session', onClick: () => startRename(item.querySelector('.session-summary'), session) },
+          { label: 'Copy session ID', onClick: () => window.api.writeClipboard(session.sessionId) },
+        ];
+        if (session.type !== 'terminal') {
+          menuItems.push(
+            { label: 'View messages', onClick: () => showJsonlViewer(session) },
+            { label: 'Move to project…', onClick: () => showMovePopover(session, moreBtn) },
+          );
+          if (!isSessionRunning(session.sessionId)) {
+            menuItems.unshift({ label: 'Resume with config…', onClick: () => showResumeSessionDialog(session) });
+          }
+        }
+        if (isDismissibleSession(session.sessionId)) {
+          menuItems.push({ label: 'Dismiss session', onClick: () => dismissSession(session.sessionId) });
+        }
+        showContextMenu(menuItems, { anchor: moreBtn });
       };
     }
 
@@ -488,6 +551,7 @@ function rebindSidebarEvents() {
           pollActiveSessions();
         }
         await window.api.archiveSession(session.sessionId, newVal);
+        if (newVal) forgetTerminalHistory(session.sessionId);
         session.archived = newVal;
         loadProjects();
       };
@@ -510,6 +574,7 @@ function buildSessionItem(session, projectPath) {
   item.className = 'session-item';
   item.id = 'si-' + session.sessionId;
   if (session.type === 'terminal') item.classList.add('is-terminal');
+  if (session.runtime && session.runtime !== 'claude') item.classList.add('is-' + session.runtime);
   if (session.launchFailed) item.classList.add('launch-failed');
   if (session.archived) item.classList.add('archived-item');
   if (activePtyIds.has(session.sessionId)) item.classList.add('has-running-pty');
@@ -525,37 +590,52 @@ function buildSessionItem(session, projectPath) {
   const row = document.createElement('div');
   row.className = 'session-row';
 
-  // Pin
-  const pin = document.createElement('span');
+  // Title and star share the top line; status and actions sit below.
+  const pin = document.createElement('button');
   pin.className = 'session-pin' + (session.starred ? ' pinned' : '');
-  pin.innerHTML = session.starred
-    ? '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707c-.28-.28-.576-.49-.888-.656L10.073 9.333l-.07 3.181a.5.5 0 0 1-.853.354l-3.535-3.536-4.243 4.243a.5.5 0 1 1-.707-.707l4.243-4.243L1.372 5.11a.5.5 0 0 1 .354-.854l3.18-.07L8.37 .722A3.37 3.37 0 0 1 9.12.074a.5.5 0 0 1 .708.002l-.707.707z"/></svg>'
-    : '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707c-.28-.28-.576-.49-.888-.656L10.073 9.333l-.07 3.181a.5.5 0 0 1-.853.354l-3.535-3.536-4.243 4.243a.5.5 0 1 1-.707-.707l4.243-4.243L1.372 5.11a.5.5 0 0 1 .354-.854l3.18-.07L8.37 .722A3.37 3.37 0 0 1 9.12.074a.5.5 0 0 1 .708.002l-.707.707z"/></svg>';
+  pin.type = 'button';
+  pin.title = session.starred ? 'Unstar session' : 'Star session';
+  pin.setAttribute('aria-label', pin.title);
+  pin.setAttribute('aria-pressed', String(!!session.starred));
+  pin.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="${session.starred ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 2.78 5.63L21 9.54l-4.5 4.39 1.06 6.2L12 17.2l-5.56 2.93 1.06-6.2L3 9.54l6.22-.91L12 3z"/></svg>`;
 
-  // Running status dot
+  // Keep the status dot separate so running, busy and unread updates still apply.
+  const mark = document.createElement('span');
+  mark.className = 'session-mark';
+
+  const markIcon = document.createElement('span');
+  markIcon.className = 'session-mark-icon';
+  if (session.type === 'terminal') {
+    markIcon.innerHTML = ICONS.terminal(14);
+    mark.title = 'Terminal session';
+  } else if (session.runtime === 'codex') {
+    markIcon.innerHTML = ICONS.codex(14);
+    mark.title = 'Codex session';
+  } else {
+    markIcon.innerHTML = ICONS.claude(14);
+    mark.title = 'Claude session';
+  }
+
   const dot = document.createElement('span');
   dot.className = 'session-status-dot' + (activePtyIds.has(session.sessionId) ? ' running' : '');
+  mark.append(markIcon, dot);
 
-  // Info block
-  const info = document.createElement('div');
-  info.className = 'session-info';
-
+  const header = document.createElement('div');
+  header.className = 'session-header';
   const summaryEl = document.createElement('div');
   summaryEl.className = 'session-summary';
   summaryEl.textContent = displayName;
+  header.append(summaryEl, pin);
 
-  // Compact meta line: time + msgs on the left, first UUID segment on the right
-  // (replaces the full-width session-id line). The 30s label ticker in app.js
-  // updates .session-time only, so it must stay its own span.
+  const footer = document.createElement('div');
+  footer.className = 'session-footer';
   const metaEl = document.createElement('div');
   metaEl.className = 'session-meta';
+  // The 30-second ticker updates this span, including the message count.
   const timeEl = document.createElement('span');
   timeEl.className = 'session-time';
-  timeEl.textContent = timeStr + (session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '');
-  const shortIdEl = document.createElement('span');
-  shortIdEl.className = 'session-short-id';
-  shortIdEl.title = session.sessionId;
-  shortIdEl.textContent = session.sessionId.split('-')[0];
+  timeEl.title = session.sessionId;
+  timeEl.textContent = timeStr + (session.messageCount ? ' · ' + session.messageCount + ' msgs' : '');
   // The directory is no longer a header above the row, so each row names its
   // own project (and branch, for worktrees).
   const projectEl = document.createElement('span');
@@ -563,28 +643,15 @@ function buildSessionItem(session, projectPath) {
   const label = projectLabel(projectPath || session.projectPath);
   projectEl.textContent = label;
   projectEl.title = projectPath || session.projectPath || '';
-  const metaLeft = document.createElement('span');
-  metaLeft.className = 'session-meta-left';
-  if (label) metaLeft.appendChild(projectEl);
-  metaLeft.appendChild(timeEl);
-  metaEl.append(metaLeft, shortIdEl);
-
-  if (session.type === 'terminal') {
-    const badge = document.createElement('span');
-    badge.className = 'terminal-badge';
-    badge.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>';
-    summaryEl.prepend(badge);
-  }
-  info.appendChild(summaryEl);
-  info.appendChild(metaEl);
-
-  // Failed launch (e.g. `--worktree` on a pre-existing branch): the session never
-  // produced a transcript. Make it read as failed and hint that clicking retries.
-  if (session.launchFailed) {
-    const failEl = document.createElement('div');
-    failEl.className = 'session-launch-failed';
-    failEl.textContent = 'launch failed · click to retry';
-    info.appendChild(failEl);
+  metaEl.append(mark);
+  if (label) metaEl.appendChild(projectEl);
+  metaEl.appendChild(timeEl);
+  // Started by a scheduled task: a clock, with which one and when in its tooltip.
+  if (session.scheduleId && typeof scheduleChipHtml === 'function') {
+    const chip = document.createElement('span');
+    chip.className = 'session-schedule-chip';
+    chip.innerHTML = scheduleChipHtml(session, { compact: true });
+    metaEl.appendChild(chip);
   }
 
   // Action buttons container
@@ -592,9 +659,12 @@ function buildSessionItem(session, projectPath) {
   actions.className = 'session-actions';
 
   const stopBtn = document.createElement('button');
-  stopBtn.className = 'session-stop-btn';
-  stopBtn.title = 'Stop session';
-  stopBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="2" width="8" height="8" rx="1"/></svg>';
+  const dismissible = typeof isDismissibleSession === 'function' && isDismissibleSession(session.sessionId);
+  stopBtn.className = 'session-stop-btn' + (dismissible ? ' session-dismiss-btn' : '');
+  stopBtn.title = dismissible ? 'Dismiss session' : 'Stop session';
+  stopBtn.innerHTML = dismissible
+    ? '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>'
+    : '<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="2" width="8" height="8" rx="1"/></svg>';
 
   const archiveBtn = document.createElement('button');
   archiveBtn.className = 'session-archive-btn';
@@ -606,35 +676,39 @@ function buildSessionItem(session, projectPath) {
   forkBtn.title = 'Fork session';
   forkBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 3h-5v5"/><path d="M21 3l-7.536 7.536a5 5 0 0 0-1.464 3.534v6.93"/><path d="M3 3l7.536 7.536a5 5 0 0 1 1.464 3.534v.93"/></svg>';
 
-  const jsonlBtn = document.createElement('button');
-  jsonlBtn.className = 'session-jsonl-btn';
-  jsonlBtn.title = 'View messages';
-  jsonlBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>';
-
-  const launchConfigBtn = document.createElement('button');
-  launchConfigBtn.className = 'session-launch-config-btn';
-  launchConfigBtn.title = 'Resume with config';
-  launchConfigBtn.innerHTML = ICONS.launchConfig(14);
-
   const isUnread = responseReadySessions.has(session.sessionId);
   const unreadBtn = document.createElement('button');
   unreadBtn.className = 'session-unread-btn';
   unreadBtn.title = isUnread ? 'Mark as read' : 'Mark as unread';
   unreadBtn.innerHTML = isUnread ? ICONS.markRead(14) : ICONS.markUnread(14);
 
-  actions.appendChild(stopBtn);
-  actions.appendChild(unreadBtn);
+  const moreBtn = document.createElement('button');
+  moreBtn.className = 'session-more-btn';
+  moreBtn.title = 'More session actions';
+  moreBtn.setAttribute('aria-haspopup', 'menu');
+  moreBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+
   if (session.type !== 'terminal') {
-    actions.appendChild(forkBtn);
-    actions.appendChild(jsonlBtn);
-    actions.appendChild(archiveBtn);
-    actions.appendChild(launchConfigBtn);
+    actions.append(archiveBtn, forkBtn);
+  }
+  actions.append(unreadBtn, stopBtn, moreBtn);
+  for (const button of actions.children) {
+    button.type = 'button';
+    button.setAttribute('aria-label', button.title);
   }
 
-  row.appendChild(pin);
-  row.appendChild(dot);
-  row.appendChild(info);
-  row.appendChild(actions);
+  footer.append(metaEl, actions);
+  row.append(header, footer);
+
+  // Failed launch (e.g. `--worktree` on a pre-existing branch): the session never
+  // produced a transcript. Make it read as failed and hint that clicking retries.
+  if (session.launchFailed) {
+    const failEl = document.createElement('div');
+    failEl.className = 'session-launch-failed';
+    failEl.textContent = 'launch failed · click to retry';
+    row.appendChild(failEl);
+  }
+
   item.appendChild(row);
 
   return item;

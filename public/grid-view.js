@@ -143,6 +143,7 @@ function showGridView() {
   memoryViewer.style.display = 'none';
   settingsViewer.style.display = 'none';
   jsonlViewer.style.display = 'none';
+  if (typeof jsonlSearch !== 'undefined') jsonlSearch?.close(false);
   terminalArea.style.display = '';
 
   // Switch #terminals to grid layout

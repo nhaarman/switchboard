@@ -125,11 +125,11 @@ function spawnSession(msg) {
     broadcast(encodeData(TYPE_DATA, currentIdOf(session) || id, buf));
   });
 
-  proc.onExit(({ exitCode }) => {
+  proc.onExit(({ exitCode, signal }) => {
     const sid = currentIdOf(session) || id;
     session.exited = true;
     session.exitCode = exitCode;
-    broadcast(encodeControl({ t: 'exit', id: sid, exitCode }));
+    broadcast(encodeControl({ t: 'exit', id: sid, exitCode, signal }));
     log.info(`session ${sid} exited code=${exitCode}`);
     session.purgeTimer = setTimeout(() => {
       for (const [key, value] of sessions) if (value === session) sessions.delete(key);

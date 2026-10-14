@@ -129,7 +129,7 @@ class PtyClient {
     }
     if (msg.t === 'exit') {
       const handler = this.exitHandlers.get(msg.id);
-      if (handler) handler(msg.exitCode);
+      if (handler) handler(msg.exitCode, msg.signal);
       return;
     }
   }
